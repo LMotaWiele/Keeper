@@ -1,0 +1,18 @@
+[Unit]
+Description=Virtual Companion Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/path/to/companion
+EnvironmentFile=/path/to/companion/.env
+ExecStart=/path/to/venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

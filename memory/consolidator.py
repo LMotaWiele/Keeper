@@ -28,6 +28,15 @@ from memory.semantic import semantic
 log = logging.getLogger(__name__)
 
 
+def _strip_fences(text: str) -> str:
+    """Strip markdown code fences that LLMs sometimes wrap JSON in."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]  # drop opening fence line
+        text = text.rsplit("```", 1)[0]  # drop closing fence
+    return text.strip()
+
+
 PATTERN_EXTRACTION_PROMPT = """\
 You are a memory consolidation system. Given a batch of recent episodic memories,
 extract the underlying *patterns* — things that are true in general, not tied to
@@ -96,10 +105,10 @@ class MemoryConsolidator:
     def llm(self) -> ChatAnthropic:
         if self._llm is None:
             self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
+                model_name=config.llm_model,
+                api_key=config.anthropic_api_key,
                 temperature=0.3,   # low temp for analytical extraction
-                max_tokens=2048,
+                max_tokens_to_sample=2048,
             )
         return self._llm
 
@@ -183,7 +192,7 @@ class MemoryConsolidator:
             response = await self.llm.ainvoke([
                 HumanMessage(content=prompt),
             ])
-            patterns = json.loads(response.content)
+            patterns = json.loads(_strip_fences(response.content))
             if not isinstance(patterns, list):
                 return []
             return patterns
@@ -232,7 +241,7 @@ class MemoryConsolidator:
             response = await self.llm.ainvoke([
                 HumanMessage(content=prompt),
             ])
-            contradictions = json.loads(response.content)
+            contradictions = json.loads(_strip_fences(response.content))
             if not isinstance(contradictions, list):
                 return []
 

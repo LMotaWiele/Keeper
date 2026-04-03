@@ -344,9 +344,10 @@ class SystemHealthStream(BaseStream):
 
         try:
             import shutil
+            import pathlib
 
             # Disk usage
-            total, used, free = shutil.disk_usage("/")
+            total, used, free = shutil.disk_usage(pathlib.Path.home())
             pct_used = used / total * 100
 
             if pct_used > 90 and self._should_warn_disk():

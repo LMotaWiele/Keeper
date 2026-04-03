@@ -160,7 +160,7 @@ class InternalState:
             d["fatigue"] = 0.02
             if event.tool_calls_made > 0:
                 d["fatigue"] += 0.01 * event.tool_calls_made
-                d["arousal"] += 0.03  # tool use is slightly stimulating
+                d["arousal"] = d.get("arousal", 0) + 0.03  # tool use is slightly stimulating
 
             # Producing output partially satisfies "create" drive
             self.drives.satisfy_by_name("create", 0.05)

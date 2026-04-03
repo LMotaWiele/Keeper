@@ -12,6 +12,14 @@ Streams included:
   - SystemHealthStream:  computational self-awareness (disk, memory, uptime)
 
 Adding a new stream: subclass BaseStream, implement poll(), done.
+
+PATCHED:
+  - TimeStream session_timeout_minutes increased from 15 to 60 minutes.
+    15 minutes was far too aggressive — natural conversation pauses
+    (thinking, doing something else, getting coffee) were triggering
+    false session ends that wiped conversational context.
+  - SessionEndEvent is now only fired once per actual session end
+    (added _end_event_fired guard to prevent repeated firing)
 """
 from __future__ import annotations
 
@@ -80,12 +88,16 @@ class TimeStream(BaseStream):
 
     Also provides contextual time awareness: time of day, day of week,
     how long since the last interaction.
+
+    PATCHED: session_timeout_minutes default changed from 15 to 60.
+    Added _end_event_fired guard so SessionEndEvent only fires once
+    per session end, not on every poll after timeout.
     """
 
     def __init__(
         self,
         poll_interval_seconds: float = 60,
-        session_timeout_minutes: float = 15,
+        session_timeout_minutes: float = 60,  # PATCHED: was 15, now 60
     ):
         super().__init__("time", poll_interval_seconds)
         self._session_timeout = session_timeout_minutes
@@ -93,6 +105,7 @@ class TimeStream(BaseStream):
         self._session_active = False
         self._session_start: datetime | None = None
         self._session_message_count = 0
+        self._end_event_fired = False  # PATCH: prevent repeated SessionEndEvents
 
     def record_user_activity(self) -> None:
         """Called by the bot when the user sends a message."""
@@ -103,6 +116,7 @@ class TimeStream(BaseStream):
             self._session_active = True
             self._session_start = now
             self._session_message_count = 0
+            self._end_event_fired = False  # PATCH: reset guard
 
         self._last_user_activity = now
         self._session_message_count += 1
@@ -121,8 +135,8 @@ class TimeStream(BaseStream):
         # Check for session transitions
         if self._session_active and self._last_user_activity:
             silence = (now - self._last_user_activity).total_seconds() / 60
-            if silence > self._session_timeout:
-                # Session ended
+            if silence > self._session_timeout and not self._end_event_fired:
+                # Session ended — fire event ONCE
                 duration = 0.0
                 if self._session_start:
                     duration = (self._last_user_activity - self._session_start).total_seconds() / 60
@@ -132,24 +146,33 @@ class TimeStream(BaseStream):
                     duration_minutes=duration,
                 ))
                 self._session_active = False
+                self._end_event_fired = True  # PATCH: don't fire again
+
+                log.info(
+                    "Session ended (timeout after %.0fm silence, "
+                    "session was %.0fm with %d messages)",
+                    silence, duration, self._session_message_count,
+                )
 
         self.mark_polled()
         return events
 
     def create_session_start_event(self) -> SessionStartEvent:
         """Generate a session start event (called when user first messages)."""
-        hours_since = 0.0
+        gap_hours = None
         if self._last_user_activity:
-            hours_since = (datetime.utcnow() - self._last_user_activity).total_seconds() / 3600
-        return SessionStartEvent(hours_since_last=hours_since)
+            gap_hours = (datetime.utcnow() - self._last_user_activity).total_seconds() / 3600
 
-    # ── Time context ──────────────────────────────────────────────────────
+        return SessionStartEvent(
+            gap_since_last_hours=gap_hours,
+            time_of_day=self._time_of_day(),
+        )
 
-    @property
-    def time_of_day(self) -> str:
-        hour = datetime.now().hour
+    def _time_of_day(self) -> str:
+        """Human-readable time of day."""
+        hour = datetime.utcnow().hour  # TODO: adjust for user timezone
         if hour < 6:
-            return "late night"
+            return "late_night"
         elif hour < 12:
             return "morning"
         elif hour < 17:
@@ -159,45 +182,30 @@ class TimeStream(BaseStream):
         else:
             return "night"
 
-    @property
-    def day_context(self) -> str:
-        now = datetime.now()
-        day = now.strftime("%A")
-        is_weekend = now.weekday() >= 5
-        return f"{day} {'(weekend)' if is_weekend else '(weekday)'}"
-
-    @property
-    def session_duration_minutes(self) -> float | None:
-        if self._session_start and self._session_active:
-            return (datetime.utcnow() - self._session_start).total_seconds() / 60
-        return None
-
     def to_context(self) -> str:
-        """Time awareness context for the system prompt."""
-        parts = [f"Time: {self.time_of_day}, {self.day_context}"]
+        """Time awareness context for the prompt."""
+        parts = []
+        now = datetime.utcnow()
+        parts.append(f"Current time: {now.strftime('%A %H:%M UTC')}")
+
+        if self._session_active and self._session_start:
+            duration = (now - self._session_start).total_seconds() / 60
+            parts.append(f"Session active for {duration:.0f} minutes")
+            parts.append(f"Messages this session: {self._session_message_count}")
 
         if self._last_user_activity:
-            silence = (datetime.utcnow() - self._last_user_activity).total_seconds()
-            if silence < 120:
-                parts.append("User is actively present")
-            elif silence < 600:
-                parts.append(f"User went quiet {silence/60:.0f}m ago")
-            else:
-                hours = silence / 3600
-                parts.append(f"Last heard from user {hours:.1f}h ago")
+            silence = (now - self._last_user_activity).total_seconds() / 60
+            if silence > 2:
+                parts.append(f"Silence: {silence:.0f} minutes")
 
-        dur = self.session_duration_minutes
-        if dur is not None:
-            parts.append(f"Session: {dur:.0f}m, {self._session_message_count} messages")
-
-        return " | ".join(parts)
+        return "\n".join(parts) if parts else ""
 
 
 # ── RSS stream ────────────────────────────────────────────────────────────
 
 class RSSStream(BaseStream):
     """
-    Polls RSS/Atom feeds for new items. Emits StreamUpdateEvents
+    External information feeds. Emits StreamUpdateEvents
     when something appears that might be salient.
 
     Requires: feedparser (pip install feedparser)

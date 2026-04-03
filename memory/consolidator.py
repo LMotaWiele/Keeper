@@ -10,6 +10,10 @@ This mirrors biological memory consolidation — experiences don't stay
 as raw episodes forever. The important patterns get abstracted into
 stable knowledge, and the episodes themselves gradually fade unless
 they're emotionally significant or frequently recalled.
+
+PATCHED: run_loop() now accepts a session_check callable and skips
+consolidation cycles when a user session is active. This prevents
+background memory operations from interfering with live conversations.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from typing import Callable
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -270,10 +275,16 @@ class MemoryConsolidator:
         self,
         user_ids: list[int],
         interval_minutes: int = 30,
+        session_check: Callable[[], bool] | None = None,
     ) -> None:
         """
         Run consolidation on a schedule for all known users.
         Designed to be started as a background task.
+
+        PATCHED: accepts session_check callable. If provided and it
+        returns True (session active), the cycle is deferred — we don't
+        want consolidation (especially decay/forgetting) running while
+        the user is mid-conversation.
         """
         self._running = True
         log.info(
@@ -282,6 +293,12 @@ class MemoryConsolidator:
         )
 
         while self._running:
+            # PATCH: Skip if any session is active
+            if session_check and session_check():
+                log.debug("Consolidation deferred — active session detected")
+                await asyncio.sleep(interval_minutes * 60)
+                continue
+
             for uid in user_ids:
                 # Skip if we ran recently
                 last = self._last_run.get(uid)

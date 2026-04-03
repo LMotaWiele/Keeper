@@ -36,6 +36,8 @@ from langchain_core.messages import HumanMessage
 
 from config.settings import config
 
+from core.opinions import OpinionRegistry
+
 log = logging.getLogger(__name__)
 
 
@@ -152,6 +154,9 @@ class SelfModel:
             "observation_count": 0,
             "model_version": 0,
         }
+
+        # Opinion tracking — anti-sycophancy infrastructure
+        self.opinions = OpinionRegistry(memory=memory_system)
 
     @property
     def llm(self) -> ChatAnthropic:
@@ -386,6 +391,13 @@ class SelfModel:
             "You can agree, disagree, or notice new tensions with this model."
         )
 
+        # Opinion awareness (anti-sycophancy)
+        opinion_ctx = self.opinions.to_prompt_context()
+        if opinion_ctx:
+            parts.append("")
+            parts.append(opinion_ctx)
+
+
         return "\n".join(parts)
 
     # ── Background loop ───────────────────────────────────────────────────
@@ -412,6 +424,19 @@ class SelfModel:
                     await self.update_model(uid)
 
             await asyncio.sleep(interval_minutes * 60)
+        
+        # Opinion review (less frequent than self-model updates)
+            opinion_interval = getattr(config, "opinion_review_interval", 180)
+            # Run opinion review every N self-model cycles
+            review_every = max(1, opinion_interval // interval_minutes)
+            if hasattr(self, "_loop_count"):
+                self._loop_count += 1
+            else:
+                self._loop_count = 0
+
+            if self._loop_count % review_every == 0 and self.opinions.opinions:
+                for uid in user_ids:
+                    await self.opinions.review_opinions(uid)
 
     def stop(self) -> None:
         self._running = False
@@ -419,21 +444,32 @@ class SelfModel:
     # ── Persistence ───────────────────────────────────────────────────────
 
     def snapshot(self) -> dict:
-        return dict(self.model)
+        data = dict(self.model)
+        data["_opinions"] = self.opinions.snapshot()
+        return data
 
     def restore(self, data: dict) -> None:
+        opinions_data = data.pop("_opinions", None)
         self.model.update(data)
+        if opinions_data:
+            self.opinions.restore(opinions_data)
 
     def save(self, path: Path) -> None:
         """Persist the self-model to disk."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.model, indent=2, default=str))
+        # Save opinion registry alongside self-model
+        opinions_path = path.parent / "opinions.json"
+        self.opinions.save(opinions_path)
 
     def load(self, path: Path) -> None:
         """Restore the self-model from disk."""
         if path.exists():
             try:
                 data = json.loads(path.read_text())
+                opinions_path = path.parent / "opinions.json"
+                self.opinions.load(opinions_path)
                 self.restore(data)
             except (json.JSONDecodeError, Exception) as e:
                 log.warning("Failed to load self-model: %s", e)
+        

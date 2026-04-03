@@ -54,7 +54,12 @@ class Settings:
     self_model_interval: int = int(os.getenv("SELF_MODEL_INTERVAL_MIN", "60"))
     autonomous_interval: int = int(os.getenv("AUTONOMOUS_INTERVAL_MIN", "5"))
     grounding_interval: int = int(os.getenv("GROUNDING_INTERVAL_SEC", "30"))
- 
+
+    # ── Opinion tracking ──────────────────────────────────────────────────
+    opinion_review_interval: int = int(os.getenv("OPINION_REVIEW_INTERVAL_MIN", "180"))
+    independence_threshold: float = float(os.getenv("INDEPENDENCE_THRESHOLD", "0.3"))
+    max_tracked_opinions: int = int(os.getenv("MAX_TRACKED_OPINIONS", "100"))
+
     # ── Session ───────────────────────────────────────────────────────────
     session_timeout_minutes: float = float(os.getenv("SESSION_TIMEOUT_MIN", "15"))
     working_memory_capacity: int = int(os.getenv("WORKING_MEMORY_CAPACITY", "20"))
@@ -65,6 +70,8 @@ class Settings:
         self.midterm_db_path.parent.mkdir(parents=True, exist_ok=True)
         Path(self.chroma_db_path).parent.mkdir(parents=True, exist_ok=True)
         (Path(self.data_dir) / "state").mkdir(parents=True, exist_ok=True)
+
+
  
  
 config = Settings()

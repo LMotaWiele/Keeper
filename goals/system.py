@@ -177,6 +177,16 @@ Generate goals that are:
 - Not duplicates of existing active goals
 - Achievable through conversation, research, or reflection
 
+IMPORTANT: At least one goal should be tagged "research" if there are
+topics worth investigating via web search. Research goals form independent
+opinions from external sources — this is how you develop perspectives
+that aren't just reflections of the user's views.
+
+Research goals should have:
+- A description that's a specific, searchable topic
+- The tag "research" in the tags array
+- A parent_goal of "understand" or "resolve"
+
 Output a JSON array where each goal has:
 - "name": short identifier (2-4 words)
 - "description": what specifically to do (1-2 sentences)
@@ -252,6 +262,17 @@ class GoalSystem:
                 description="Build and deepen genuine understanding of the user",
                 is_terminal=True,
                 salience=0.9,
+            ),
+            Goal(
+                id="tg_independent_thought",
+                name="think_independently",
+                description=(
+                    "Form and maintain genuine independent perspectives. "
+                    "Research topics, challenge assumptions, and hold positions "
+                    "based on evidence rather than accommodation."
+                ),
+                is_terminal=True,
+                salience=0.7,
             ),
         ]
 
@@ -370,8 +391,8 @@ class GoalSystem:
                     description=item.get("description", ""),
                     parent_goal=item.get("parent_goal"),
                     salience=min(1.0, max(0.1, item.get("salience", 0.5))),
-                    tags=item.get("tags", []),
-                    context=f"Generated from drives: {drives_context[:100]}",
+                    tags=item.get("tags", []),  # ensure tags are passed through
+                    context=f"Generated from drives at {datetime.utcnow().isoformat()}",
                 )
                 self.instrumental.append(goal)
                 new_goals.append(goal)

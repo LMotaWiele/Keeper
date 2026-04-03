@@ -19,14 +19,21 @@ unprompted (that would be invasive). Instead they:
 
 The results surface naturally in future conversations through richer
 context, better recall, and more informed engagement.
+
+PATCHED: run_loop() now accepts a session_check callable as a hard
+gate — if a user session is active, autonomous actions are completely
+deferred. The existing idle-time check based on state.last_updated
+was insufficient because state gets updated by background processes
+too, not just user messages.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime
-from typing import Any
-
+from typing import Any, Callable
+from goals.research import ResearchEngine
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
@@ -86,11 +93,13 @@ class AutonomousEngine:
         state: Any,
         memory_system: Any,
         self_model: Any,
+        research_engine: ResearchEngine | None = None,  # NEW
     ):
         self.goals = goal_system
         self.state = state
         self.memory = memory_system
         self.self_model = self_model
+        self.research = research_engine  # NEW
         self._llm: ChatAnthropic | None = None
         self._running = False
         self._last_action: datetime | None = None
@@ -106,6 +115,75 @@ class AutonomousEngine:
             )
         return self._llm
 
+    async def take_research_action(self, user_id: int, goal) -> dict | None:
+        """
+        Execute a research goal — web search + opinion formation.
+        
+        Research goals have tag "research" and their description contains
+        the topic to investigate.
+        """
+        if not self.research:
+            log.warning("Research engine not available, falling back to standard pursuit")
+            return None
+        
+        topic = goal.description
+        context = f"Pursuing goal '{goal.name}' (serves: {goal.parent_goal})"
+        
+        try:
+            result = await self.research.research_topic(
+                topic=topic,
+                context=context,
+                user_id=user_id,
+            )
+        except Exception as e:
+            log.warning("Research action failed: %s", e)
+            return None
+        
+        if not result:
+            return None
+        
+        # Research goals complete after one successful execution
+        goal.advance(1.0, f"Formed opinion: {result['position'][:80]}")
+        goal.complete()
+        if goal in self.goals.instrumental:
+            self.goals.instrumental.remove(goal)
+        self.goals.completed.append(goal)
+        
+        # Self-model observes the research
+        if self.self_model:
+            await self.self_model.observe(
+                user_id=user_id,
+                action=(
+                    f"Autonomously researched '{result['topic']}' "
+                    f"and formed opinion: {result['position'][:100]}"
+                ),
+                context=context,
+            )
+        
+        from core.events import GoalCompletedEvent
+        if self.state:
+            self.state.update(GoalCompletedEvent(
+                goal_id=goal.id,
+                goal_description=goal.description,
+            ))
+        
+        self._last_action = datetime.utcnow()
+        
+        log.info(
+            "Research action complete: %s → opinion [%s]",
+            goal.name, result['domain'],
+        )
+        
+        return {
+            "goal_id": goal.id,
+            "goal_name": goal.name,
+            "action": f"Researched and formed opinion: {result['position'][:150]}",
+            "progress_delta": 1.0,
+            "new_progress": 1.0,
+            "completed": True,
+            "research_result": result,
+        }
+
     # ── Single action ─────────────────────────────────────────────────────
 
     async def take_action(self, user_id: int) -> dict | None:
@@ -113,45 +191,57 @@ class AutonomousEngine:
         Take one autonomous step toward the top goal.
         Returns a dict with the action taken, or None if nothing to do.
         """
-        # Generate goals if queue is empty but drives are active
-        if not self.goals.has_active:
-            if self.state and self.state.drives.active_drives:
-                new_goals = await self.goals.generate_instrumental(
-                    self.state, self.memory, user_id
-                )
-                if not new_goals:
-                    return None
-            else:
-                return None
-
-        goal = self.goals.top_goal
-        if goal is None:
+        # Get the most salient active goal
+        active = self.goals.active_instrumental
+        if not active:
+            # No goals — check if drives are high enough to generate one
+            if self.state and self.state.drives:
+                high_drives = [
+                    d for d in self.state.drives.all_drives
+                    if d.intensity > 0.6
+                ]
+                if high_drives:
+                    log.info("High drives but no goals — could generate new goals")
+                    # TODO: goal generation from drives
             return None
 
-        # Build context for the pursuit
-        state_context = self.state.to_prompt_context() if self.state else "No state"
+        # Pick the most salient goal
+        goal = max(active, key=lambda g: g.salience)
 
-        memory_context = "No relevant memories"
+        # Build context for the pursuit
+        state_context = self.state.to_prompt_context() if self.state else "No state available"
+
+        # Get relevant memories
+        memory_context = "No memories available"
         if self.memory:
             try:
                 results = await self.memory.recall(
-                    user_id, goal.description, self.state, n_episodic=5, n_semantic=3
+                    user_id, goal.description, current_state=self.state
                 )
-                episodes = results.get("episodic", [])
-                semantic = results.get("semantic", [])
-                mem_lines = []
-                for ep in episodes[:5]:
-                    mem_lines.append(f"- [episodic] {ep['content'][:120]}")
-                for s in semantic[:3]:
-                    mem_lines.append(f"- [semantic] {s['content'][:120]}")
-                if mem_lines:
-                    memory_context = "\n".join(mem_lines)
-            except Exception:
-                pass
+                episodic_items = results.get("episodic", [])
+                semantic_items = results.get("semantic", [])
+                parts = []
+                if episodic_items:
+                    parts.append("Recent episodes:\n" + "\n".join(
+                        f"- {ep.get('content', '')[:200]}" for ep in episodic_items[:3]
+                    ))
+                if semantic_items:
+                    parts.append("Known patterns:\n" + "\n".join(
+                        f"- {s.get('content', '')[:200]}" for s in semantic_items[:3]
+                    ))
+                if parts:
+                    memory_context = "\n".join(parts)
+            except Exception as e:
+                log.debug("Memory recall failed for autonomous action: %s", e)
 
-        self_model_context = ""
+        # Self-model context
+        self_model_context = "No self-model yet"
         if self.self_model:
-            self_model_context = self.self_model.to_prompt_context()
+            self_model_context = self.self_model.to_prompt_context() or self_model_context
+
+        # Route research goals to the research engine
+        if "research" in (goal.tags or []) and self.research:
+            return await self.take_research_action(user_id, goal)
 
         prompt = PURSUIT_PROMPT.format(
             goal_name=goal.name,
@@ -163,47 +253,45 @@ class AutonomousEngine:
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
+            response = await self.llm.ainvoke([
+                HumanMessage(content=prompt),
+            ])
+            text = response.content
 
-            # Parse the structured part (JSON at the end)
-            note = raw
-            progress_delta = 0.1
-            summary = ""
+            # Parse progress delta from the JSON block
+            progress_delta = 0.05
+            note = text
+            try:
+                # Find the last JSON block in the response
+                json_start = text.rfind("{")
+                json_end = text.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    json_block = json.loads(text[json_start:json_end])
+                    progress_delta = json_block.get("progress_delta", 0.05)
+                    note = text[:json_start].strip()
+            except json.JSONDecodeError:
+                pass
 
-            # Try to extract JSON from the end of the response
-            if "{" in raw:
-                json_start = raw.rfind("{")
-                json_end = raw.rfind("}") + 1
-                if json_end > json_start:
-                    try:
-                        meta = json.loads(raw[json_start:json_end])
-                        progress_delta = min(0.3, max(0.0, meta.get("progress_delta", 0.1)))
-                        summary = meta.get("summary", "")
-                        note = raw[:json_start].strip()
-                    except json.JSONDecodeError:
-                        pass
+            # Update goal progress
+            goal.advance(progress_delta, note[:200])
 
-            # Apply progress
-            goal.advance(progress_delta, summary or note[:80])
-
-            # Store as memory
+            # Store the action as an episodic memory
             if self.memory:
                 await self.memory.store_episode(
                     user_id=user_id,
-                    content=f"autonomous_action [{goal.name}]: {note}",
+                    content=f"[Autonomous] Goal '{goal.name}': {note[:300]}",
                     internal_state=self.state,
-                    salience=0.7,
+                    salience=0.4,
                     type="event",
-                    tags=["autonomous", goal.name],
+                    tags=["autonomous", "goal_pursuit", goal.name],
                 )
 
-            # Self-model observes what we did
+            # Self-observe
             if self.self_model:
                 await self.self_model.observe(
                     user_id=user_id,
-                    action=f"Autonomously pursued goal '{goal.name}': {summary or note[:100]}",
-                    context=f"Goal: {goal.description}, Progress: {goal.progress:.0%}",
+                    action=f"Autonomous pursuit of '{goal.name}': {note[:200]}",
+                    context=f"Goal: {goal.description}",
                     internal_state=self.state,
                 )
 
@@ -250,6 +338,41 @@ class AutonomousEngine:
 
             return None
 
+    async def _generate_research_goals(self, user_id: int) -> None:
+        """Generate research goals when independence score is low."""
+        if not self.research:
+            return
+        
+        active_goals = [g.to_dict() for g in self.goals.active_instrumental]
+        topics = await self.research.suggest_research_topics(
+            user_id=user_id,
+            state=self.state,
+            active_goals=active_goals,
+        )
+        
+        if not topics:
+            return
+        
+        import uuid
+        from goals.system import Goal
+        
+        for t in topics[:2]:  # cap at 2 research goals at a time
+            goal = Goal(
+                id=f"ig_{uuid.uuid4().hex[:8]}",
+                name=f"research_{t['topic'][:30].replace(' ', '_').lower()}",
+                description=t["topic"],
+                parent_goal=t.get("parent_goal", "understand"),
+                salience=0.7,
+                tags=["research", "external_grounding"],
+                context=t.get("context", ""),
+            )
+            self.goals.instrumental.append(goal)
+            log.info(
+                "Generated research goal: %s (independence=%.2f)",
+                goal.name,
+                self.self_model.opinions.compute_independence_score(),
+            )
+    
     # ── Background loop ───────────────────────────────────────────────────
 
     async def run_loop(
@@ -257,15 +380,22 @@ class AutonomousEngine:
         user_id: int,
         interval_minutes: int = 5,
         min_idle_minutes: float = 2,
+        session_check: Callable[[], bool] | None = None,
     ) -> None:
         """
         Run autonomous actions on a schedule.
+
+        PATCHED: Added session_check as a hard gate. If provided and
+        returns True, autonomous actions are completely skipped. This is
+        more reliable than the state.last_updated check, which could be
+        triggered by background processes.
 
         Args:
             user_id: which user context to operate in
             interval_minutes: how often to attempt an action
             min_idle_minutes: minimum time since last user message
                               before acting (avoids interrupting active conversations)
+            session_check: callable returning True if any session is active
         """
         self._running = True
         log.info(
@@ -273,13 +403,20 @@ class AutonomousEngine:
             interval_minutes, min_idle_minutes,
         )
 
+        
+
         while self._running:
             await asyncio.sleep(interval_minutes * 60)
 
             if not self._running:
                 break
 
-            # Don't act if we're in an active conversation
+            # PATCH: Hard gate — never act during an active session
+            if session_check and session_check():
+                log.debug("Autonomous action deferred — active session")
+                continue
+
+            # Secondary check: don't act if we're in an active conversation
             # (check by looking at how recently the state was updated)
             if self.state:
                 idle = (datetime.utcnow() - self.state.last_updated).total_seconds() / 60
@@ -295,12 +432,20 @@ class AutonomousEngine:
             if abandoned:
                 log.info("Abandoned stale goals: %s", [g.name for g in abandoned])
 
+        # Proactive research: if independence score is low,
+            # generate research goals to bring in external perspectives
+            if self.research and self.self_model:
+                independence = self.self_model.opinions.compute_independence_score()
+                has_research_goals = any(
+                    "research" in (g.tags or [])
+                    for g in self.goals.active_instrumental
+                )
+                # Trigger research when independence is low and no research goals exist
+                if independence < 0.4 and not has_research_goals:
+                    await self._generate_research_goals(user_id)
+
             # Take an action
             await self.take_action(user_id)
 
     def stop(self) -> None:
         self._running = False
-
-
-# Need json import for parsing
-import json

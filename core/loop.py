@@ -1,110 +1,85 @@
 """
-The conscious architecture — the main feedback loop.
+Conscious architecture — the central orchestrator.
 
-This is where all five pillars connect into a coherent system.
-Not a pipeline (input → output) but a continuous loop:
+PATCHED:
+  - Working memory now persisted in _save_state() and restored in startup()
+  - Background loops pass session_active reference so they can check before acting
+  - _save_state() is now safe to call anytime without side effects on working memory
+  - Added is_session_active() helper for background processes
 
-    Internal state → influences what gets remembered
-    Memory → shapes the self-model
-    Self-model → influences goal structures
-    Goals → direct environmental attention
-    Environment → updates internal state
+    Background processes (started on startup):
+      - Environmental grounding loop (polls streams, updates state)
+      - Memory consolidation loop (episodic → semantic, decay, forgetting)
+      - Self-model update loop (analyzes behavioral history)
+      - Autonomous goal pursuit loop (acts between user inputs)
 
-The system that responds tomorrow is different from the one today
-because things happened in between — not because instructions changed,
-but because it experienced something, consolidated memories, updated
-its self-model, and pursued goals while nobody was watching.
-
-Usage:
-    from core.loop import companion
-
-    await companion.startup()        # init + load state + start background loops
-    response = await companion.process(user_id, "hello")
-    await companion.shutdown()       # save state + stop background loops
+    Foreground process (called per user message):
+      - process() builds context from all pillars, returns it for the
+        LangGraph agent, then updates all pillars with what happened.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from config.settings import config
 from core.internal_state import InternalState
-from core.self_model import SelfModel
 from core.events import (
     UserMessageEvent,
     ResponseGeneratedEvent,
-    SessionStartEvent,
 )
-from memory import MemorySystem, memory_system
+from core.self_model import SelfModel
 from environment.grounding import EnvironmentalGrounding
 from goals.system import GoalSystem
 from goals.autonomous import AutonomousEngine
+from memory import memory_system
+from goals.research import ResearchEngine
 
 log = logging.getLogger(__name__)
 
 
-# ── Novelty estimation (lightweight, no LLM call) ────────────────────────
+def _state_dir() -> Path:
+    return Path(config.data_dir) / "state"
+
 
 class NoveltyEstimator:
-    """
-    Tracks recent topics to estimate how novel a new message is.
-    Uses simple token overlap — not perfect, but fast and inline.
-    """
+    """Track what's been seen to estimate novelty of new inputs."""
 
-    def __init__(self, window: int = 30):
-        self._recent_tokens: list[set[str]] = []
+    def __init__(self, window: int = 50):
+        self._seen: list[str] = []
         self._window = window
 
     def estimate(self, text: str) -> float:
-        """Return 0.0 (repetitive) to 1.0 (completely new)."""
-        tokens = set(text.lower().split())
-        if not tokens:
-            return 0.5
-
-        if not self._recent_tokens:
-            self._recent_tokens.append(tokens)
-            return 0.8  # first message is fairly novel
-
-        # Compute overlap with recent messages
-        all_recent = set()
-        for t in self._recent_tokens:
-            all_recent |= t
-
-        if not all_recent:
+        words = set(text.lower().split())
+        if not self._seen:
+            self._seen.append(text)
             return 0.8
 
-        overlap = len(tokens & all_recent) / len(tokens)
+        seen_words = set()
+        for s in self._seen[-self._window:]:
+            seen_words.update(s.lower().split())
+
+        if not words:
+            return 0.5
+
+        overlap = len(words & seen_words) / len(words)
         novelty = 1.0 - overlap
 
-        self._recent_tokens.append(tokens)
-        if len(self._recent_tokens) > self._window:
-            self._recent_tokens.pop(0)
+        self._seen.append(text)
+        if len(self._seen) > self._window * 2:
+            self._seen = self._seen[-self._window:]
 
-        # Scale: 0.2 (very repetitive) to 0.9 (very novel)
-        return 0.2 + novelty * 0.7
+        return max(0.1, min(1.0, novelty))
 
     def clear(self) -> None:
-        self._recent_tokens.clear()
+        self._seen.clear()
 
-
-# ── State persistence paths ───────────────────────────────────────────────
-
-def _state_dir() -> Path:
-    d = Path(config.data_dir) / "state"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-# ── The main architecture ────────────────────────────────────────────────
 
 class ConsciousArchitecture:
     """
-    The central nervous system. Owns all five pillars and orchestrates
-    the continuous feedback loop between them.
+    The central loop wiring all five pillars together.
 
     Background processes (started on startup):
       - Environmental grounding loop (polls streams, updates state)
@@ -143,11 +118,31 @@ class ConsciousArchitecture:
         self.self_model = SelfModel(memory_system=self.memory)
         self.autonomous.self_model = self.self_model  # wire the circular dep
 
+        # Research engine — connects autonomous goals to opinion formation
+        self.research = ResearchEngine(
+            opinion_registry=self.self_model.opinions,
+            memory_system=self.memory,
+        )
+        self.autonomous.research = self.research
+
         # Utilities
         self._novelty = NoveltyEstimator()
         self._background_tasks: list[asyncio.Task] = []
         self._started = False
         self._session_active: dict[int, bool] = {}
+
+    # ── Session query (for background processes) ──────────────────────────
+
+    def is_session_active(self, user_id: int) -> bool:
+        """
+        Check if a user has an active conversation session.
+        Used by background processes to avoid disrupting active conversations.
+        """
+        return self._session_active.get(user_id, False)
+
+    def any_session_active(self) -> bool:
+        """Check if ANY user has an active session."""
+        return any(self._session_active.values())
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -168,8 +163,31 @@ class ConsciousArchitecture:
         state_dir = _state_dir()
         self.state.load(state_dir / "internal_state.json")
         self.self_model.load(state_dir / "self_model.json")
+        self.self_model.opinions.load(state_dir / "opinions.json")
+        log.info(
+            "Opinions loaded — %d tracked, independence=%.2f",
+            len(self.self_model.opinions.opinions),
+            self.self_model.opinions.compute_independence_score(),
+        )
         self.goals.load(state_dir / "goals.json")
         self.environment.load(state_dir / "environment.json")
+
+        # 3. Restore working memory (conversation thread)
+        self.memory.working.load(state_dir / "working_memory.json")
+        working_users = [
+            uid for uid in self.memory.working._buffers
+            if self.memory.working.size(uid) > 0
+        ]
+        if working_users:
+            log.info(
+                "Working memory restored for %d user(s) — conversation continuity preserved",
+                len(working_users),
+            )
+            # If there's recent working memory, mark session as potentially active
+            # (the next message will confirm it properly)
+            for uid in working_users:
+                if self.memory.working.has_recent_activity(uid, minutes=60):
+                    log.info("User %d has recent working memory — session may resume", uid)
 
         log.info(
             "State restored — arousal=%.2f, curiosity=%.2f, fatigue=%.2f, "
@@ -181,7 +199,7 @@ class ConsciousArchitecture:
             len(self.goals.active_instrumental),
         )
 
-        # 3. Start background loops
+        # 4. Start background loops
         self._start_background_loops()
 
         self._started = True
@@ -208,7 +226,7 @@ class ConsciousArchitecture:
                 except asyncio.CancelledError:
                     pass
 
-        # Save state
+        # Save state (includes working memory now)
         await self._save_state()
 
         self._started = False
@@ -230,11 +248,12 @@ class ConsciousArchitecture:
             ))
         )
 
-        # Memory consolidation (every 30 min)
+        # Memory consolidation (every 30 min, session-aware)
         self._background_tasks.append(
             loop.create_task(self.memory.consolidator.run_loop(
                 user_ids=user_ids,
                 interval_minutes=30,
+                session_check=self.any_session_active,
             ))
         )
 
@@ -252,19 +271,28 @@ class ConsciousArchitecture:
                 user_id=primary_user,
                 interval_minutes=5,
                 min_idle_minutes=2,
+                session_check=self.any_session_active,
             ))
         )
 
         log.info("Background loops started (%d tasks)", len(self._background_tasks))
 
     async def _save_state(self) -> None:
-        """Persist all pillar state to disk."""
+        """
+        Persist all pillar state to disk.
+        PATCHED: Now includes working memory so conversations survive restarts.
+        """
         state_dir = _state_dir()
         try:
             self.state.save(state_dir / "internal_state.json")
             self.self_model.save(state_dir / "self_model.json")
             self.goals.save(state_dir / "goals.json")
             self.environment.save(state_dir / "environment.json")
+            self.self_model.opinions.save(state_dir / "opinions.json")
+
+            # PATCH: persist the conversation thread
+            self.memory.working.save(state_dir / "working_memory.json")
+
             log.info("State saved to %s", state_dir)
         except Exception:
             log.exception("Failed to save state")
@@ -371,6 +399,16 @@ class ConsciousArchitecture:
             internal_state=self.state,
         )
 
+        # Opinion detection — runs after each response
+        try:
+            await self.self_model.opinions.detect_opinions(
+                user_id=user_id,
+                user_message=user_text,
+                system_response=response_text,
+            )
+        except Exception:
+            log.debug("Opinion detection failed", exc_info=True)
+
         # Goals evaluate progress
         try:
             updates = await self.goals.evaluate_progress(user_text, response_text)
@@ -379,7 +417,7 @@ class ConsciousArchitecture:
         except Exception:
             pass  # goal eval is best-effort
 
-        # Periodic save (every 10 messages)
+        # Periodic save (every 10 messages) — now includes working memory
         msg_count = self.state._messages_this_session
         if msg_count > 0 and msg_count % 10 == 0:
             await self._save_state()
@@ -514,6 +552,9 @@ class ConsciousArchitecture:
             "completed_goals": len(self.goals.completed),
             "environment": self.environment.stats,
             "background_tasks": len([t for t in self._background_tasks if not t.done()]),
+            "active_sessions": {
+                uid: active for uid, active in self._session_active.items()
+            },
         }
 
 

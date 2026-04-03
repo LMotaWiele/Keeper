@@ -6,11 +6,14 @@ langchain-openai>=0.2.0          # for embeddings
 langchain-community>=0.3.0
 
 # Memory
-chromadb>=0.5.0                  # long-term vector store
-aiosqlite>=0.20.0                # mid-term async SQLite
+chromadb>=0.5.0                  # semantic vector store
+aiosqlite>=0.20.0                # episodic async SQLite
 
 # Tools
 tavily-python>=0.3.0             # web search
+
+# Environment
+feedparser>=6.0.0                # RSS stream (optional but recommended)
 
 # Telegram
 python-telegram-bot>=21.0        # async Telegram bot

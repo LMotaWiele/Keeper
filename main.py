@@ -1,16 +1,27 @@
 """
-Main entrypoint — initialises everything and starts the Telegram bot.
+Main entrypoint — initialises the conscious architecture and starts the Telegram bot.
+
+Startup order:
+  1. Logging
+  2. Config (ensure dirs)
+  3. Companion startup (init memory, load state, start background loops)
+  4. Telegram bot polling
+
+Shutdown:
+  - Companion saves all state to disk
+  - Background loops stop gracefully
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
 
 import structlog
 
 from config.settings import config
-from memory.mid_term import mid_term
+from core.loop import companion
 from telegram.bot import build_application
 
 
@@ -41,26 +52,46 @@ async def startup() -> None:
     log.info("Companion starting up…")
 
     config.ensure_dirs()
-    await mid_term.init()
 
-    log.info("Memory layers ready", db=str(config.midterm_db_path), chroma=str(config.chroma_db_path))
-    log.info("Allowed users", ids=config.allowed_user_ids)
-    log.info("LLM model", model=config.llm_model)
+    # Start the conscious architecture (loads state, starts background loops)
+    await companion.startup()
+
+    log.info("Architecture ready",
+             db=str(config.midterm_db_path),
+             chroma=str(config.chroma_db_path),
+             users=config.allowed_user_ids,
+             model=config.llm_model)
+
+
+async def shutdown() -> None:
+    log = structlog.get_logger()
+    log.info("Shutting down…")
+    await companion.shutdown()
+    log.info("Goodbye.")
 
 
 def main() -> None:
     setup_logging()
+    log = structlog.get_logger()
+
+    # Run startup
     asyncio.run(startup())
 
+    # Build and start the Telegram bot
     app = build_application()
 
-    log = structlog.get_logger()
     log.info("Telegram bot polling… (Ctrl+C to stop)")
 
-    app.run_polling(
-        allowed_updates=["message"],
-        drop_pending_updates=True,   # ignore messages sent while offline
-    )
+    try:
+        app.run_polling(
+            allowed_updates=["message"],
+            drop_pending_updates=True,
+        )
+    except KeyboardInterrupt:
+        log.info("Interrupted by user")
+    finally:
+        # Graceful shutdown — save all state
+        asyncio.run(shutdown())
 
 
 if __name__ == "__main__":

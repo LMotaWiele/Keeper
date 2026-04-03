@@ -1,9 +1,13 @@
 """
 LangGraph agent — the companion's brain.
 
+Updated to integrate with the ConsciousArchitecture. The graph no longer
+builds its own context — it receives a rich context dict from
+companion.process() that includes all five pillars.
+
 Graph topology:
   ┌─────────────┐
-  │  load_context│  ← Reads SOUL.md + all memory layers into state
+  │  load_context│  ← Receives pre-built context from the companion loop
   └──────┬──────┘
          │
   ┌──────▼──────┐
@@ -15,13 +19,11 @@ Graph topology:
     └────┬────┘
          │ no
   ┌──────▼──────┐
-  │  consolidate│  ← After responding, summarise & update mid/long-term memory
+  │   finalize  │  ← Signals the runner to call post_process
   └─────────────┘
 """
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Annotated, Any
 
 from langchain_anthropic import ChatAnthropic
@@ -32,30 +34,26 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from config.settings import config
-from memory.mid_term import mid_term
-from memory.long_term import long_term
-from memory.short_term import short_term
 from tools import ALL_TOOLS
 
 
-# ── State ─────────────────────────────────────────────────────────────────────
+# ── State ─────────────────────────────────────────────────────────────────
 
 class CompanionState(TypedDict):
     user_id: int
     messages: Annotated[list[BaseMessage], add_messages]
-    soul: str                    # contents of SOUL.md
-    mid_term_context: str        # formatted mid-term memory block
-    long_term_context: str       # formatted long-term memory block
+    system_prompt: str
     tool_calls_pending: bool
+    response_text: str               # final response for post_process
+    tool_calls_made: int              # count for post_process
 
 
-# ── LLM ───────────────────────────────────────────────────────────────────────
+# ── LLM ───────────────────────────────────────────────────────────────────
 
 llm = ChatAnthropic(
     model=config.llm_model,
@@ -67,64 +65,36 @@ llm = ChatAnthropic(
 llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
 
-# ── Nodes ─────────────────────────────────────────────────────────────────────
+# ── Nodes ─────────────────────────────────────────────────────────────────
 
 async def load_context(state: CompanionState) -> dict[str, Any]:
-    """Load SOUL.md and memory context into state."""
-    user_id = state["user_id"]
-
-    # Soul
-    soul_path = config.soul_file_path
-    soul = soul_path.read_text() if soul_path.exists() else "# No SOUL.md found."
-
-    # Last message as the query for long-term search
-    last_human = next(
-        (m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
-        "",
-    )
-
-    mid_ctx = await mid_term.format_for_prompt(user_id)
-    lt_ctx = await long_term.format_for_prompt(user_id, last_human)
-
-    return {
-        "soul": soul,
-        "mid_term_context": mid_ctx,
-        "long_term_context": lt_ctx,
-    }
-
-
-def _build_system_prompt(state: CompanionState) -> str:
-    parts = [state["soul"]]
-
-    if state.get("mid_term_context"):
-        parts.append(state["mid_term_context"])
-
-    if state.get("long_term_context"):
-        parts.append(state["long_term_context"])
-
-    parts.append(
-        "\n---\n"
-        "You have tools available: web search and memory management. "
-        "Use web_search when you need current information. "
-        "Use memory tools to save important facts/preferences/summaries proactively — "
-        "your future self depends on them.\n"
-        "Reply naturally, as a companion would. Never break character."
-    )
-
-    return "\n\n".join(parts)
+    """
+    Context is already built by the companion loop and passed in
+    via the initial state. This node just confirms it's present.
+    """
+    # system_prompt and messages are set by the runner before invocation
+    return {}
 
 
 async def reason(state: CompanionState) -> dict[str, Any]:
     """Core LLM reasoning step."""
-    system_prompt = _build_system_prompt(state)
-    messages = [SystemMessage(content=system_prompt)] + state["messages"]
+    messages = [SystemMessage(content=state["system_prompt"])] + state["messages"]
 
     response = await llm_with_tools.ainvoke(messages)
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
+    tool_count = state.get("tool_calls_made", 0)
+    if has_tool_calls:
+        tool_count += len(response.tool_calls)
+
+    # Track the latest text response
+    response_text = response.content if isinstance(response.content, str) else ""
+
     return {
         "messages": [response],
         "tool_calls_pending": has_tool_calls,
+        "response_text": response_text,
+        "tool_calls_made": tool_count,
     }
 
 
@@ -145,7 +115,6 @@ async def tool_executor(state: CompanionState) -> dict[str, Any]:
             result = f"Unknown tool: {tc['name']}"
         else:
             try:
-                # Inject user_id into memory tools automatically
                 args = tc["args"].copy()
                 if "user_id" in tool.args_schema.model_fields:
                     args.setdefault("user_id", state["user_id"])
@@ -160,58 +129,25 @@ async def tool_executor(state: CompanionState) -> dict[str, Any]:
     return {"messages": tool_messages, "tool_calls_pending": False}
 
 
-async def consolidate(state: CompanionState) -> dict[str, Any]:
+async def finalize(state: CompanionState) -> dict[str, Any]:
     """
-    After the final reply, ask the LLM to extract any new facts/preferences
-    worth saving, and store a session summary in long-term memory.
+    Final node — nothing to do here. The runner reads response_text
+    from the state and calls companion.post_process() after the graph
+    completes.
+
+    This replaces the old consolidate node. Consolidation now happens
+    in the companion's background loops instead of blocking every response.
     """
-    user_id = state["user_id"]
-
-    # Build a brief conversation transcript
-    transcript_parts = []
-    for m in state["messages"]:
-        if isinstance(m, HumanMessage):
-            transcript_parts.append(f"User: {m.content}")
-        elif isinstance(m, AIMessage) and m.content:
-            transcript_parts.append(f"Assistant: {m.content}")
-    transcript = "\n".join(transcript_parts[-10:])  # last 10 turns
-
-    extraction_prompt = (
-        "You are a memory curator. Given this conversation excerpt, output a JSON object with:\n"
-        '- "facts": list of factual statements about the user worth remembering\n'
-        '- "preferences": list of preferences the user expressed\n'
-        '- "summary": a 1-2 sentence summary of this exchange\n'
-        "Output ONLY valid JSON, no other text.\n\n"
-        f"Conversation:\n{transcript}"
-    )
-
-    try:
-        extraction = await llm.ainvoke([HumanMessage(content=extraction_prompt)])
-        data = json.loads(extraction.content)
-
-        for fact in data.get("facts", []):
-            await mid_term.store(user_id, "fact", fact, importance=0.7)
-
-        for pref in data.get("preferences", []):
-            await mid_term.store(user_id, "preference", pref, importance=0.6)
-
-        summary = data.get("summary", "")
-        if summary:
-            await long_term.store(user_id, summary, metadata={"type": "session_summary"})
-
-    except Exception:
-        pass  # Consolidation is best-effort
-
     return {}
 
 
-# ── Routing ───────────────────────────────────────────────────────────────────
+# ── Routing ───────────────────────────────────────────────────────────────
 
 def route_after_reason(state: CompanionState) -> str:
-    return "tool_executor" if state["tool_calls_pending"] else "consolidate"
+    return "tool_executor" if state["tool_calls_pending"] else "finalize"
 
 
-# ── Graph ─────────────────────────────────────────────────────────────────────
+# ── Graph ─────────────────────────────────────────────────────────────────
 
 def build_graph() -> Any:
     g = StateGraph(CompanionState)
@@ -219,16 +155,16 @@ def build_graph() -> Any:
     g.add_node("load_context", load_context)
     g.add_node("reason", reason)
     g.add_node("tool_executor", tool_executor)
-    g.add_node("consolidate", consolidate)
+    g.add_node("finalize", finalize)
 
     g.set_entry_point("load_context")
     g.add_edge("load_context", "reason")
     g.add_conditional_edges("reason", route_after_reason, {
         "tool_executor": "tool_executor",
-        "consolidate": "consolidate",
+        "finalize": "finalize",
     })
-    g.add_edge("tool_executor", "reason")   # loop back after tool use
-    g.add_edge("consolidate", END)
+    g.add_edge("tool_executor", "reason")
+    g.add_edge("finalize", END)
 
     return g.compile()
 

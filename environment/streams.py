@@ -164,7 +164,7 @@ class TimeStream(BaseStream):
             gap_hours = (datetime.utcnow() - self._last_user_activity).total_seconds() / 3600
 
         return SessionStartEvent(
-            gap_since_last_hours=gap_hours,
+            hours_since_last=gap_hours or 0.0,
             time_of_day=self._time_of_day(),
         )
 

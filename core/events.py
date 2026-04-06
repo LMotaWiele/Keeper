@@ -119,6 +119,7 @@ class SessionStartEvent(Event):
     source: EventSource = "environment"
     type: str = "session_start"
     hours_since_last: float = 0.0
+    time_of_day: str = ""
 
 
 @dataclass

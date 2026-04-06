@@ -45,3 +45,8 @@ tools/__pycache__/__init__.cpython-313.pyc
 tools/__pycache__/memory_tools.cpython-313.pyc
 tools/__pycache__/web_search.cpython-313.pyc
 .env
+test_opinions.py
+core/__pycache__/opinions.cpython-313.pyc
+goals/__pycache__/research.cpython-313.pyc
+data/state/working_memory.json
+data/state/opinions.json

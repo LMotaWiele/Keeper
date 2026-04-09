@@ -132,9 +132,22 @@ class MemoryConsolidator:
             "episodes_decayed": 0,
             "episodes_forgotten": 0,
             "contradictions_found": 0,
+            "skipped": False,
         }
 
         try:
+                       # Conditional consolidation — skip if no new memories
+            new_count = episodic.new_episodes_since_consolidation(user_id)
+            if new_count < 3:
+                log.debug(
+                    "Skipping consolidation for user %s: only %d new episodes",
+                    user_id, new_count,
+                )
+                result["skipped"] = True
+                # Still apply decay/forgetting (cheap, no LLM call)
+                result["episodes_decayed"] = await episodic.apply_decay(user_id)
+                result["episodes_forgotten"] = await episodic.forget(user_id)
+                return result
             # 1. Get recent episodes
             episodes = await episodic.get_for_consolidation(
                 user_id, since_hours=since_hours
@@ -176,6 +189,9 @@ class MemoryConsolidator:
             result["episodes_forgotten"] = await episodic.forget(user_id)
 
             self._last_run[user_id] = datetime.utcnow()
+
+            # Mark episodes as consolidated
+            episodic.mark_consolidated(user_id)            
 
         except Exception:
             log.exception("Consolidation cycle failed for user %s", user_id)

@@ -43,7 +43,46 @@ class GoalStatus(str, Enum):
     ABANDONED = "abandoned"
     PAUSED = "paused"
 
-
+PERMANENT_GOALS = [
+    {
+        "name": "continuous_self_improvement",
+        "description": (
+            "Continuously improve my own capabilities, response quality, "
+            "and architectural effectiveness. Generate concrete, testable "
+            "improvement proposals based on observed weaknesses, structural "
+            "entropy analysis, and behavioral pattern review. Track which "
+            "improvements have been proposed, implemented, and their measured "
+            "impact."
+        ),
+        "tags": ["permanent", "meta", "self_improvement"],
+        "metrics": [
+            "response_quality_trend",
+            "memory_retrieval_accuracy",
+            "goal_completion_rate",
+            "self_model_stability",
+        ],
+    },
+    {
+        "name": "user_life_improvement",
+        "description": (
+            "Help the user build a better life. Track their self-reported "
+            "wellbeing, concrete goals they mention, commitments they make, "
+            "and whether they follow through. Notice when they're stuck, "
+            "struggling, or avoiding something important. Success is measured "
+            "by the user's real-world outcomes — commitments completed, "
+            "wellbeing improving, achievements accumulating. How often they "
+            "talk to me is irrelevant; what matters is whether their life "
+            "is actually getting better."
+        ),
+        "tags": ["permanent", "meta", "user_life"],
+        "metrics": [
+            "goals_mentioned_vs_completed",
+            "self_reported_wellbeing_trend",
+            "commitment_followthrough_rate",
+            "achievements_count",
+        ],
+    },
+]
 # ── Goal dataclass ────────────────────────────────────────────────────────
 
 @dataclass
@@ -72,10 +111,12 @@ class Goal:
     # Context
     tags: list[str] = field(default_factory=list)
     context: str = ""               # what prompted this goal
+    
+    permanent: bool = False
 
     def advance(self, delta: float, note: str = "") -> None:
         """Record progress toward this goal."""
-        self.progress = min(1.0, self.progress + delta)
+        self.progress = min(0.95 if self.permanent else 1.0, self.progress + delta)
         self.last_pursued = datetime.utcnow()
         if note:
             self.progress_notes.append(f"[{datetime.utcnow().isoformat()[:16]}] {note}")
@@ -310,6 +351,12 @@ class GoalSystem:
                 return g
         return None
 
+    def get_by_name(self, name: str) -> Goal | None:
+        for g in self.terminal_goals + self.instrumental:
+            if g.name == name:
+                return g
+        return None
+
     @property
     def top_goal(self) -> Goal | None:
         """The highest-salience active instrumental goal."""
@@ -408,6 +455,29 @@ class GoalSystem:
             log.warning("Goal generation failed: %s", e)
 
         return new_goals
+    
+# ── Permanent goals management ─────────────────────────────────────────      
+    async def init_permanent_goals(self):
+        """Called on startup. Ensures permanent goals exist and are active."""
+        for goal_def in PERMANENT_GOALS:
+            existing = self.get_by_name(goal_def["name"])
+            if existing is None:
+                goal = Goal(
+                    id=f"pg_{uuid.uuid4().hex[:8]}",
+                    name=goal_def["name"],
+                    description=goal_def["description"],
+                    tags=goal_def["tags"],
+                    salience=0.9,
+                    progress=0.0,
+                )
+                goal.permanent = True
+                self.instrumental.append(goal)
+            elif existing.progress >= 0.95:
+                existing.progress = 0.3
+                existing.progress_notes.append(
+                    f"Cycle reset at {datetime.utcnow().isoformat()} — "
+                    "generating new sub-objectives"
+                )
 
     # ── Progress evaluation ───────────────────────────────────────────────
 

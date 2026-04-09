@@ -50,3 +50,11 @@ core/__pycache__/opinions.cpython-313.pyc
 goals/__pycache__/research.cpython-313.pyc
 data/state/working_memory.json
 data/state/opinions.json
+data/state/resource_budgets.json
+data/state/theorizer.json
+data/state/user_life.json
+environment/__pycache__/future_sim.cpython-313.pyc
+core/__pycache__/user_life.cpython-313.pyc
+core/__pycache__/resource_budgets.cpython-313.pyc
+core/__pycache__/codebase_index.cpython-313.pyc
+goals/__pycache__/self_theorizing.cpython-313.pyc

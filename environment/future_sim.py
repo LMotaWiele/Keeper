@@ -1,0 +1,132 @@
+"""
+Future simulation — anticipatory reasoning before actions.
+
+Gated by importance threshold to avoid simulating trivial actions.
+Adds a "what might happen if I do X" step to the processing pipeline.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
+
+from config.settings import config
+
+log = logging.getLogger(__name__)
+
+SIMULATE_PROMPT = """\
+You are simulating the likely outcomes of a planned action before executing it.
+
+## Planned Action
+{action_description}
+
+## Current Context
+- Conversation state: {conversation_context}
+- Internal state: {internal_state}
+- Relevant memory: {memory_context}
+- Active goals: {goals_context}
+
+Simulate 2-3 likely outcomes of this action:
+
+For each outcome, assess:
+1. Probability (0.0-1.0)
+2. Impact on user relationship (positive/neutral/negative)
+3. Impact on active goals (advances/neutral/hinders)
+4. Emotional trajectory (how internal state would shift)
+5. Risk level (low/medium/high)
+
+Then recommend: proceed, modify, or abandon — with reasoning.
+
+Output as JSON:
+{{
+  "outcomes": [
+    {{
+      "description": "...",
+      "probability": 0.0,
+      "user_impact": "positive|neutral|negative",
+      "goal_impact": "advances|neutral|hinders",
+      "emotional_shift": "...",
+      "risk": "low|medium|high"
+    }}
+  ],
+  "recommendation": "proceed|modify|abandon",
+  "reasoning": "...",
+  "suggested_modification": null
+}}
+"""
+
+
+class FutureSimulator:
+    """
+    Simulates action outcomes before execution.
+
+    Only invoked when action importance exceeds threshold — most
+    conversational responses skip this entirely.
+    """
+
+    IMPORTANCE_THRESHOLD = 0.6
+
+    def __init__(self):
+        self._llm: ChatAnthropic | None = None
+
+    @property
+    def llm(self) -> ChatAnthropic:
+        if self._llm is None:
+            self._llm = ChatAnthropic(
+                model=config.llm_model,
+                anthropic_api_key=config.anthropic_api_key,
+                temperature=0.5,
+                max_tokens=1500,
+            )
+        return self._llm
+
+    async def should_simulate(
+        self, action_description: str, internal_state: Any
+    ) -> bool:
+        """
+        Quick heuristic: is this action important enough to simulate?
+        """
+        importance = 0.3
+
+        if "[autonomous]" in action_description.lower():
+            importance += 0.3
+
+        if internal_state and internal_state.valence < 0.3:
+            importance += 0.2
+
+        if internal_state and internal_state.arousal > 0.8:
+            importance += 0.15
+
+        return importance >= self.IMPORTANCE_THRESHOLD
+
+    async def simulate(
+        self,
+        action_description: str,
+        conversation_context: str = "",
+        internal_state: Any = None,
+        memory_context: str = "",
+        goals_context: str = "",
+    ) -> dict | None:
+        """Run a simulation. Returns recommendation dict or None on failure."""
+        prompt = SIMULATE_PROMPT.format(
+            action_description=action_description,
+            conversation_context=conversation_context[:500],
+            internal_state=(
+                internal_state.to_prompt_context() if internal_state else "N/A"
+            ),
+            memory_context=memory_context[:500],
+            goals_context=goals_context[:300],
+        )
+
+        try:
+            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            raw = result.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            return json.loads(raw)
+        except Exception as e:
+            log.warning("Future simulation failed: %s", e)
+            return None

@@ -92,6 +92,7 @@ class EpisodicMemory:
 
     def __init__(self, db_path: Path | None = None):
         self.db_path = str(db_path or config.midterm_db_path)
+        self._new_since_consolidation: dict[int, int] = {}  # user_id → count
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -153,6 +154,11 @@ class EpisodicMemory:
                     _now_iso(),
                     expires_at.isoformat() if expires_at else None,
                 ),
+            )
+
+            uid = user_id
+            self._new_since_consolidation[uid] = (
+                self._new_since_consolidation.get(uid, 0) + 1
             )
             await db.commit()
             return cursor.lastrowid
@@ -390,6 +396,12 @@ class EpisodicMemory:
             ) as cursor:
                 (n,) = await cursor.fetchone()
                 return n
+    
+    def new_episodes_since_consolidation(self, user_id: int) -> int:
+            return self._new_since_consolidation.get(user_id, 0)
+     
+    def mark_consolidated(self, user_id: int):
+            self._new_since_consolidation[user_id] = 0
 
 
 # Singleton

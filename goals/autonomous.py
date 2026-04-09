@@ -103,6 +103,8 @@ class AutonomousEngine:
         self._llm: ChatAnthropic | None = None
         self._running = False
         self._last_action: datetime | None = None
+        self.theorizer: Any | None = None    # SelfTheorizer, set by ConsciousArchitecture
+        self.simulator: Any | None = None    # FutureSimulator, set by ConsciousArchitecture
 
     @property
     def llm(self) -> ChatAnthropic:
@@ -208,6 +210,13 @@ class AutonomousEngine:
         # Pick the most salient goal
         goal = max(active, key=lambda g: g.salience)
 
+        # Route self-improvement to theorizer
+        if goal.name == "continuous_self_improvement" and self.theorizer:
+            result = await self.theorizer.theorize(user_id, self.state)
+            if result:
+                goal.advance(0.1, f"Theorizing cycle: {len(result.get('proposals', []))} proposals")
+            return result
+
         # Build context for the pursuit
         state_context = self.state.to_prompt_context() if self.state else "No state available"
 
@@ -238,6 +247,28 @@ class AutonomousEngine:
         self_model_context = "No self-model yet"
         if self.self_model:
             self_model_context = self.self_model.to_prompt_context() or self_model_context
+
+        if self.simulator:
+            action_desc = f"[Autonomous] Goal '{goal.name}': {goal.description[:200]}"
+            goals_ctx = f"Active goals: {[g.name for g in self.goals.active_instrumental]}"
+            if await self.simulator.should_simulate(action_desc, self.state):
+                sim = await self.simulator.simulate(
+                    action_description=action_desc,
+                    conversation_context="No active session",
+                    internal_state=self.state,
+                    memory_context=memory_context,
+                    goals_context=goals_ctx,
+                )
+                if sim and sim.get("recommendation") == "abandon":
+                    goal.notes.append(
+                        f"Action abandoned after simulation: {sim.get('reasoning', '')[:200]}"
+                    )
+                    return None
+                elif sim and sim.get("recommendation") == "modify":
+                    # Use modified action description in the pursuit prompt
+                    modified_desc = sim.get("suggested_modification", "")
+                    if modified_desc:
+                        goal.description = modified_desc
 
         # Route research goals to the research engine
         if "research" in (goal.tags or []) and self.research:
@@ -401,9 +432,7 @@ class AutonomousEngine:
         log.info(
             "Autonomous loop started (interval=%dm, idle_min=%.1fm)",
             interval_minutes, min_idle_minutes,
-        )
-
-        
+        )        
 
         while self._running:
             await asyncio.sleep(interval_minutes * 60)
@@ -427,25 +456,25 @@ class AutonomousEngine:
             if self.state and self.state.fatigue > 0.8:
                 continue
 
-            # Maintain goals: abandon stale ones
-            abandoned = self.goals.abandon_stale()
-            if abandoned:
-                log.info("Abandoned stale goals: %s", [g.name for g in abandoned])
+        # Maintain goals: abandon stale ones
+        abandoned = self.goals.abandon_stale()
+        if abandoned:
+            log.info("Abandoned stale goals: %s", [g.name for g in abandoned])
 
         # Proactive research: if independence score is low,
-            # generate research goals to bring in external perspectives
-            if self.research and self.self_model:
-                independence = self.self_model.opinions.compute_independence_score()
-                has_research_goals = any(
-                    "research" in (g.tags or [])
-                    for g in self.goals.active_instrumental
-                )
-                # Trigger research when independence is low and no research goals exist
-                if independence < 0.4 and not has_research_goals:
-                    await self._generate_research_goals(user_id)
+        # generate research goals to bring in external perspectives
+        if self.research and self.self_model:
+            independence = self.self_model.opinions.compute_independence_score()
+            has_research_goals = any(
+                "research" in (g.tags or [])
+                for g in self.goals.active_instrumental
+            )
+            # Trigger research when independence is low and no research goals exist
+            if independence < 0.4 and not has_research_goals:
+                await self._generate_research_goals(user_id)
 
-            # Take an action
-            await self.take_action(user_id)
+        # Take an action
+        await self.take_action(user_id)
 
     def stop(self) -> None:
         self._running = False

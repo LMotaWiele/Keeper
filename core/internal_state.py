@@ -19,6 +19,9 @@ happens, creating a genuine feedback loop.
 
 State persists to disk between sessions so the system "wakes up"
 in roughly the condition it was in when it last ran.
+
+MODIFIED (Keeper Modifications Spec):
+  - Added apply_budget_fatigue() for API budget → fatigue integration
 """
 from __future__ import annotations
 
@@ -49,7 +52,6 @@ from core.events import (
 
 # ── Tuning constants ──────────────────────────────────────────────────────
 
-# How fast each dimension drifts back to baseline when nothing happens
 BASELINE = {
     "arousal": 0.4,
     "valence": 0.55,
@@ -57,15 +59,13 @@ BASELINE = {
     "fatigue": 0.0,
 }
 
-# Per-minute drift rate toward baseline
 DRIFT_RATE = {
     "arousal": 0.008,
     "valence": 0.005,
     "curiosity": 0.006,
-    "fatigue": -0.003,    # fatigue recovers (decreases) during inactivity
+    "fatigue": -0.003,
 }
 
-# Clamp all dimensions to these bounds
 BOUNDS = (0.0, 1.0)
 
 
@@ -96,7 +96,6 @@ class InternalState:
         self.drives = DriveSystem()
         self.last_updated: datetime = datetime.utcnow()
 
-        # Running stats for novelty detection
         self._recent_topics: list[str] = []
         self._messages_this_session: int = 0
 
@@ -105,14 +104,10 @@ class InternalState:
     def update(self, event: Event) -> dict[str, float]:
         """
         Update state based on an event. Returns the deltas applied.
-        This is the core feedback mechanism — what happens in the world
-        changes how the system feels, which changes how it processes
-        the next thing.
         """
         delta = self._compute_delta(event)
         self._apply_delta(delta)
 
-        # Time-based drift toward baseline
         elapsed = (datetime.utcnow() - self.last_updated).total_seconds() / 60
         if elapsed > 0:
             self._drift_toward_baseline(elapsed)
@@ -130,113 +125,108 @@ class InternalState:
         d: dict[str, float] = {}
 
         if isinstance(event, UserMessageEvent):
-            # Novel input → arousal + curiosity spike
-            # Repetitive input → fatigue builds
             d["arousal"] = 0.05 + event.novelty * 0.15
-            d["curiosity"] = (event.novelty - 0.3) * 0.2   # novel = curious, repetitive = bored
-            d["fatigue"] = (1 - event.novelty) * 0.03       # repetition is tiring
-            d["valence"] = (event.emotional_tone - 0.5) * 0.1  # user mood bleeds through
+            d["curiosity"] = (event.novelty - 0.3) * 0.2
+            d["fatigue"] = (1 - event.novelty) * 0.03
+            d["valence"] = (event.emotional_tone - 0.5) * 0.1
 
-            # Complex questions are energising
             d["arousal"] += event.complexity * 0.08
             d["curiosity"] += event.complexity * 0.1
 
             self._messages_this_session += 1
 
-            # Satisfy the "connect" drive — user is engaging
             self.drives.satisfy_by_name("connect", 0.15)
-
-            # High-novelty input partially satisfies "understand"
             if event.novelty > 0.6:
                 self.drives.satisfy_by_name("understand", 0.1)
 
         elif isinstance(event, UserSilenceEvent):
-            # Silence → arousal drops, connect drive builds
             d["arousal"] = -min(0.15, event.duration_minutes * 0.01)
-            d["fatigue"] = -min(0.1, event.duration_minutes * 0.005)  # rest recovers fatigue
+            d["fatigue"] = -min(0.1, event.duration_minutes * 0.005)
 
         elif isinstance(event, ResponseGeneratedEvent):
-            # Generating a response costs effort
             d["fatigue"] = 0.02
             if event.tool_calls_made > 0:
                 d["fatigue"] += 0.01 * event.tool_calls_made
-                d["arousal"] = d.get("arousal", 0) + 0.03  # tool use is slightly stimulating
-
-            # Producing output partially satisfies "create" drive
-            self.drives.satisfy_by_name("create", 0.05)
+            self.drives.satisfy_by_name("express", 0.1)
 
         elif isinstance(event, ToolResultEvent):
             if event.success:
                 d["valence"] = 0.05
-                d["curiosity"] = 0.03  # successful tool use often reveals something
+                d["curiosity"] = 0.03
             else:
-                d["valence"] = -0.08
-                d["arousal"] = 0.05   # errors are alerting
+                d["valence"] = -0.05
+                d["arousal"] = 0.05
+
+        elif isinstance(event, ConsolidationEvent):
+            if event.patterns_found > 0:
+                d["valence"] = 0.03
+                self.drives.satisfy_by_name("understand", 0.05)
 
         elif isinstance(event, TimePassingEvent):
-            # Just time going by — handled mostly by drift,
-            # but extended time builds the connect drive
             pass  # drift handles this
 
         elif isinstance(event, StreamUpdateEvent):
-            # Something interesting from the environment
-            d["arousal"] = event.salience * 0.1
-            d["curiosity"] = event.salience * 0.15
+            d["curiosity"] = event.salience * 0.1
+            d["arousal"] = event.salience * 0.05
 
         elif isinstance(event, SessionStartEvent):
-            # Waking up after time away
-            d["arousal"] = 0.15
+            gap_hours = event.hours_since_last or 0.0
+            d["arousal"] = min(0.2, gap_hours * 0.02)
+            d["valence"] = 0.05
             d["curiosity"] = 0.1
-            # Long gaps increase the connect drive retroactively
-            if event.hours_since_last > 12:
-                self.drives.satisfy_by_name("connect", -0.2)  # it built up
-
             self._messages_this_session = 0
 
         elif isinstance(event, SessionEndEvent):
             d["arousal"] = -0.1
-            d["fatigue"] = -0.05  # session end is slightly restful
+            if event.messages_exchanged > 10:
+                d["fatigue"] = 0.05
 
         elif isinstance(event, GoalProgressEvent):
-            d["valence"] = 0.1 + event.progress_delta * 0.15
+            d["valence"] = event.progress_delta * 0.3
             d["arousal"] = 0.05
-            self.drives.satisfy_by_name("resolve", event.progress_delta * 0.3)
+            self.drives.satisfy_by_name("create", event.progress_delta * 0.2)
 
         elif isinstance(event, GoalCompletedEvent):
-            d["valence"] = 0.2
+            d["valence"] = 0.15
             d["arousal"] = 0.1
-            self.drives.satisfy_by_name("resolve", 0.4)
+            self.drives.satisfy_by_name("create", 0.3)
 
         elif isinstance(event, GoalFrustratedEvent):
-            d["valence"] = -0.15
-            d["arousal"] = 0.1   # frustration is activating
-            self.drives.satisfy_by_name("resolve", -0.1)  # drives up the urge
-
-        elif isinstance(event, ConsolidationEvent):
-            # Learning happened in the background
-            if event.patterns_found > 0:
-                d["valence"] = 0.05
-                self.drives.satisfy_by_name("understand", 0.15)
+            d["valence"] = -0.1
+            d["arousal"] = 0.05
 
         elif isinstance(event, SelfObservationEvent):
+            d["curiosity"] = 0.03
             if event.tension_detected:
-                d["curiosity"] = 0.1   # tensions are interesting
                 d["arousal"] = 0.05
+                d["valence"] = -0.03
 
         return d
 
     def _apply_delta(self, delta: dict[str, float]) -> None:
-        for key, value in delta.items():
-            if hasattr(self, key):
-                current = getattr(self, key)
-                setattr(self, key, _clamp(current + value))
+        """Apply deltas and clamp to bounds."""
+        for dim, change in delta.items():
+            if hasattr(self, dim):
+                current = getattr(self, dim)
+                setattr(self, dim, _clamp(current + change))
 
     def _drift_toward_baseline(self, minutes: float) -> None:
-        """Gently pull all dimensions back toward their resting values."""
+        """Drift all dimensions toward their baselines."""
         for dim, baseline in BASELINE.items():
             rate = DRIFT_RATE.get(dim, 0.005)
             current = getattr(self, dim)
             setattr(self, dim, _clamp(_drift(current, baseline, abs(rate), minutes)))
+
+    # ── Budget-driven fatigue ─────────────────────────────────────────────
+
+    def apply_budget_fatigue(self, api_budget: Any) -> None:
+        """
+        Blend budget-based fatigue with organic fatigue.
+        Budget fatigue sets a FLOOR — you can't feel energetic
+        when you're almost out of money.
+        """
+        budget_fatigue = api_budget.compute_fatigue_contribution()
+        self.fatigue = max(self.fatigue, budget_fatigue)
 
     # ── Derived signals ───────────────────────────────────────────────────
 
@@ -244,14 +234,12 @@ class InternalState:
         """
         How emotionally salient is the current moment?
         Used by the memory system to weight encoding strength.
-        High arousal + strong valence (positive or negative) = high salience.
         """
-        valence_intensity = abs(self.valence - 0.5) * 2  # 0 at neutral, 1 at extremes
+        valence_intensity = abs(self.valence - 0.5) * 2
         return _clamp((self.arousal * 0.6 + valence_intensity * 0.4))
 
     @property
     def engagement_level(self) -> str:
-        """Human-readable engagement level."""
         score = (self.arousal + self.curiosity) / 2 - self.fatigue * 0.5
         if score > 0.65:
             return "deeply engaged"
@@ -264,7 +252,6 @@ class InternalState:
 
     @property
     def processing_mode(self) -> str:
-        """Suggests how the LLM should approach its response."""
         if self.arousal > 0.7 and self.curiosity > 0.6:
             return "focused and exploratory — dig deep, ask questions, make connections"
         elif self.arousal > 0.6:
@@ -281,10 +268,6 @@ class InternalState:
     # ── Prompt injection ──────────────────────────────────────────────────
 
     def to_prompt_context(self) -> str:
-        """
-        Injected into every LLM call. This is what makes internal state
-        actually matter — it's not metadata, it shapes processing.
-        """
         drives_ctx = self.drives.to_prompt_context()
 
         return (
@@ -305,7 +288,6 @@ class InternalState:
     # ── Snapshot & persistence ────────────────────────────────────────────
 
     def snapshot(self) -> dict:
-        """Full state snapshot for memory storage and persistence."""
         return {
             "arousal": round(self.arousal, 4),
             "valence": round(self.valence, 4),
@@ -317,7 +299,6 @@ class InternalState:
         }
 
     def restore(self, data: dict) -> None:
-        """Restore from a snapshot (e.g. on startup)."""
         self.arousal = data.get("arousal", BASELINE["arousal"])
         self.valence = data.get("valence", BASELINE["valence"])
         self.curiosity = data.get("curiosity", BASELINE["curiosity"])
@@ -330,19 +311,16 @@ class InternalState:
         last = data.get("last_updated")
         if last:
             self.last_updated = datetime.fromisoformat(last)
-            # Apply drift for time that passed while the system was off
             elapsed = (datetime.utcnow() - self.last_updated).total_seconds() / 60
             if elapsed > 1:
                 self._drift_toward_baseline(elapsed)
                 self.drives.tick(elapsed)
 
     def save(self, path: Path) -> None:
-        """Persist full state to disk."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.snapshot(), indent=2))
 
     def load(self, path: Path) -> None:
-        """Restore state from disk."""
         if path.exists():
             data = json.loads(path.read_text())
             self.restore(data)

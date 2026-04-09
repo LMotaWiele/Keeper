@@ -15,12 +15,19 @@ The model tracks:
   - characteristic_responses:  signature ways it handles situations
   - growth_trajectory:         how it has changed over time
   - tensions:                  unresolved internal contradictions
+  - hypotheses:                testable predictions about own behavior
 
 The update loop runs periodically (not every message), analysing
 recent self-observations stored in episodic memory and using the LLM
 to derive patterns. The resulting model is injected into every LLM call
 alongside the internal state — so the system knows who it is while
 it's deciding what to do.
+
+MODIFIED (Keeper Modifications Spec):
+  - Added CodebaseIndex integration for structural self-knowledge
+  - Added hypothesis generation (self-model biases goals/actions)
+  - Added RecursionGuard with diversity tracking and stagnation detection
+  - Multi-layer update: observation → consistency check → contrarian review
 """
 from __future__ import annotations
 
@@ -85,6 +92,8 @@ Recent behavioral observations:
 {observations}
 
 {previous_model_context}
+
+{architecture_context}
 """
 
 OBSERVATION_SUMMARY_PROMPT = """\
@@ -109,23 +118,153 @@ Your response was:
 {response}
 """
 
+HYPOTHESIS_PROMPT = """\
+Based on your behavioral observations and current self-model, generate
+1-3 hypotheses about yourself that could be tested through future behavior.
+
+Good hypotheses are:
+- Specific and falsifiable
+- Based on patterns in the observations
+- Actionable (suggest what to do differently)
+- Self-critical where warranted (not just self-affirming)
+
+Current self-model:
+{self_model}
+
+Recent observations:
+{observations}
+
+For each hypothesis, output:
+{{
+  "statement": "clear, specific hypothesis about a behavioral pattern",
+  "confidence": 0.0-1.0,
+  "evidence": ["observations that support this"],
+  "goal_implications": ["what goals or actions this suggests"],
+  "action_bias": "brief description of how this should bias action choices"
+}}
+
+Output a JSON array. Be honest — include uncomfortable hypotheses.
+"""
+
+CONTRARIAN_PROMPT = """\
+Your self-model has been stable for several update cycles. This might mean
+it's accurate — or it might mean you've locked into a narrative about yourself
+that you're no longer questioning.
+
+Current self-model:
+{self_model}
+
+Challenge this model. For each major claim it makes about you, consider:
+- What would it look like if the OPPOSITE were true?
+- What evidence might you be ignoring or downweighting?
+- Are there recent behaviors that don't fit this narrative?
+- Is this model flattering you? Being too harsh? Avoiding something?
+
+Output a JSON object with:
+{{
+  "challenges": [
+    {{
+      "claim_challenged": "the specific claim from the model",
+      "counter_evidence": "what suggests this might be wrong",
+      "alternative_interpretation": "different way to read the same data",
+      "severity": "minor|moderate|fundamental"
+    }}
+  ],
+  "suggested_model_updates": ["specific changes to make"],
+  "overall_assessment": "Is this model honest or has it become a comfortable story?"
+}}
+"""
+
+
+# ── Recursion guard ───────────────────────────────────────────────────────
+
+DIVERSITY_THRESHOLD = 0.3
+STAGNATION_LIMIT = 3
+
+
+class RecursionGuard:
+    """Prevents semantic collapse in recursive self-modeling."""
+
+    def __init__(self):
+        self.model_history: list[dict] = []
+        self.stagnation_count: int = 0
+
+    def record_model(self, model: dict):
+        """Store a snapshot after each update."""
+        snapshot = {
+            k: v for k, v in model.items()
+            if k not in (
+                "last_updated", "observation_count",
+                "model_version", "observations_analysed",
+            )
+        }
+        self.model_history.append(snapshot)
+        if len(self.model_history) > 10:
+            self.model_history = self.model_history[-10:]
+
+    def compute_diversity(self) -> float:
+        """How much has the model changed between the last two versions?"""
+        if len(self.model_history) < 2:
+            return 1.0
+
+        prev = json.dumps(self.model_history[-2], sort_keys=True)
+        curr = json.dumps(self.model_history[-1], sort_keys=True)
+
+        prev_words = set(prev.lower().split())
+        curr_words = set(curr.lower().split())
+
+        if not prev_words or not curr_words:
+            return 1.0
+
+        intersection = prev_words & curr_words
+        union = prev_words | curr_words
+        jaccard = len(intersection) / len(union) if union else 1.0
+
+        return 1.0 - jaccard
+
+    def should_force_contrarian(self) -> bool:
+        """Has the model been too stable for too long?"""
+        diversity = self.compute_diversity()
+        if diversity < DIVERSITY_THRESHOLD:
+            self.stagnation_count += 1
+        else:
+            self.stagnation_count = 0
+        return self.stagnation_count >= STAGNATION_LIMIT
+
+    def snapshot(self) -> dict:
+        return {
+            "model_history": self.model_history,
+            "stagnation_count": self.stagnation_count,
+        }
+
+    def restore(self, data: dict):
+        self.model_history = data.get("model_history", [])
+        self.stagnation_count = data.get("stagnation_count", 0)
+
+
+# ── Self-model ────────────────────────────────────────────────────────────
+
 
 class SelfModel:
     """
     Builds and maintains an evolving model of the system's own behavior.
 
-    Two phases:
+    Three phases:
       1. observe() — called after every response, stores a self-observation
          in episodic memory (lightweight, runs inline)
-      2. update_model() — called periodically, analyses accumulated observations
-         and rebuilds the model (heavier, runs in background)
+      2. update_model() — called periodically, multi-layer analysis:
+         Layer 1: Observation-based pattern derivation
+         Layer 2: Consistency check against recent behavior
+         Layer 3: Contrarian challenge when stagnant
+      3. generate_hypotheses() — produces testable predictions that bias goals
 
     The model is injected into the system prompt via to_prompt_context(),
     giving the system genuine self-knowledge that evolves with its behavior.
     """
 
-    def __init__(self, memory_system: Any = None):
-        self.memory = memory_system  # set during init or injected later
+    def __init__(self, memory_system: Any = None, codebase: Any = None):
+        self.memory = memory_system
+        self.codebase = codebase  # CodebaseIndex, optional
         self._llm: ChatAnthropic | None = None
         self._running = False
 
@@ -150,6 +289,8 @@ class SelfModel:
             },
             "growth_trajectory": [],
             "tensions": [],
+            "hypotheses": [],
+            "consistency_flags": [],
             "last_updated": None,
             "observation_count": 0,
             "model_version": 0,
@@ -157,6 +298,9 @@ class SelfModel:
 
         # Opinion tracking — anti-sycophancy infrastructure
         self.opinions = OpinionRegistry(memory=memory_system)
+
+        # Recursion guard — prevents semantic collapse
+        self.recursion_guard = RecursionGuard()
 
     @property
     def llm(self) -> ChatAnthropic:
@@ -199,7 +343,6 @@ class SelfModel:
                 context, action
             )
         else:
-            # Lightweight: store a compact observation directly
             observation_text = self._compact_observation(action, context, outcome)
 
         return await self.memory.store_episode(
@@ -218,7 +361,6 @@ class SelfModel:
         outcome: str | None,
     ) -> str:
         """Quick inline observation without LLM call."""
-        # Truncate for storage efficiency
         action_brief = action[:300] if len(action) > 300 else action
         context_brief = context[:150] if len(context) > 150 else context
 
@@ -244,34 +386,57 @@ class SelfModel:
             log.warning("Observation summary failed: %s", e)
             return self._compact_observation(response, context, None)
 
-    # ── Model update (runs periodically) ──────────────────────────────────
+    # ── Model update (multi-layer, runs periodically) ─────────────────────
 
     async def update_model(self, user_id: int) -> dict:
         """
-        Analyse accumulated self-observations and rebuild the model.
+        Multi-layer recursive self-modeling:
+        Layer 1: Observe behavior → derive patterns
+        Layer 2: Check model consistency against recent behavior
+        Layer 3: Contrarian challenge when stagnant
 
-        This is the recursive part — the system examines its own
-        behavioral history and derives who it is from what it's done.
+        Then generate hypotheses for goal/action biasing.
+
+        !!!Avoid apostrophes in contractions, or to use a simpler structure that doesn't require them, to reduce the chances of the LLM generating malformed JSON.!!!
         """
         if self.memory is None:
             return self.model
 
-        # Fetch recent self-observations from episodic memory
+        # Layer 1: Standard observation-based update
+        await self._layer1_observation_update(user_id)
+
+        # Record for diversity tracking
+        self.recursion_guard.record_model(self.model)
+
+        # Layer 2: Consistency check (every other cycle)
+        if self.model.get("model_version", 0) % 2 == 0:
+            await self._layer2_consistency_check(user_id)
+
+        # Layer 3: Contrarian challenge (only when stagnant)
+        if self.recursion_guard.should_force_contrarian():
+            log.info("Self-model stagnant — forcing contrarian review")
+            await self._layer3_contrarian_review(user_id)
+
+        # Generate hypotheses after model update
+        await self.generate_hypotheses(user_id)
+
+        return self.model
+
+    async def _layer1_observation_update(self, user_id: int) -> None:
+        """Analyse accumulated self-observations and rebuild the model."""
         observations = await self.memory.episodic.get_recent(
             user_id, limit=50, type="self_observation"
         )
 
         if len(observations) < 5:
             log.info("Not enough observations to update self-model (%d)", len(observations))
-            return self.model
+            return
 
-        # Format observations for the LLM
         obs_text = "\n".join(
             f"[{i+1}] {obs['content']}"
             for i, obs in enumerate(observations)
         )
 
-        # Include previous model for continuity
         prev_context = ""
         if self.model.get("model_version", 0) > 0:
             prev_context = (
@@ -279,16 +444,23 @@ class SelfModel:
                 f"{json.dumps(self.model, indent=2, default=str)}"
             )
 
+        # Architecture context from codebase index
+        architecture_context = ""
+        if self.codebase:
+            architecture_context = (
+                "Your own architecture (from source code analysis):\n"
+                + self.codebase.summary
+            )
+
         prompt = ANALYSIS_PROMPT.format(
             observations=obs_text,
             previous_model_context=prev_context,
+            architecture_context=architecture_context,
         )
 
         try:
             result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            # Parse and validate the response
             raw = result.content.strip()
-            # Handle potential markdown code fences
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
                 if raw.endswith("```"):
@@ -297,7 +469,6 @@ class SelfModel:
 
             updated = json.loads(raw)
 
-            # Merge with existing model (preserve metadata)
             self.model.update(updated)
             self.model["last_updated"] = datetime.utcnow().isoformat()
             self.model["model_version"] = self.model.get("model_version", 0) + 1
@@ -310,7 +481,6 @@ class SelfModel:
                 len(self.model.get("tensions", [])),
             )
 
-            # Store the model update itself as a significant event
             await self.memory.store_episode(
                 user_id=user_id,
                 content=f"self_model_update: v{self.model['model_version']} — "
@@ -326,77 +496,161 @@ class SelfModel:
         except Exception as e:
             log.exception("Self-model update failed: %s", e)
 
-        return self.model
+    async def _layer2_consistency_check(self, user_id: int) -> None:
+        """Does the model's claims match recent actual behavior?"""
+        recent_obs = await self.memory.episodic.get_recent(
+            user_id, limit=10, type="self_observation"
+        )
+        if not recent_obs:
+            return
+
+        obs_text = " ".join(o["content"] for o in recent_obs)
+        obs_words = set(obs_text.lower().split())
+
+        unsupported = []
+        for key, claim in self.model.get("behavioral_patterns", {}).items():
+            if isinstance(claim, str) and claim != "not yet observed":
+                claim_words = set(claim.lower().split())
+                overlap = len(claim_words & obs_words) / max(len(claim_words), 1)
+                if overlap < 0.1:
+                    unsupported.append(f"{key}: '{claim}'")
+
+        if unsupported:
+            self.model["consistency_flags"] = unsupported[-5:]
+
+    async def _layer3_contrarian_review(self, user_id: int) -> None:
+        """Full LLM-powered challenge of the current self-model."""
+        prompt = CONTRARIAN_PROMPT.format(
+            self_model=json.dumps(self.model, indent=2, default=str)
+        )
+        try:
+            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            raw = result.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            review = json.loads(raw)
+
+            for update in review.get("suggested_model_updates", []):
+                self.model.setdefault("pending_revisions", []).append(update)
+
+            for challenge in review.get("challenges", []):
+                if challenge.get("severity") in ("moderate", "fundamental"):
+                    self.model.setdefault("tensions", []).append(
+                        f"[contrarian] {challenge['claim_challenged']}: "
+                        f"{challenge['alternative_interpretation']}"
+                    )
+
+            # Reset stagnation counter
+            self.recursion_guard.stagnation_count = 0
+
+            log.info(
+                "Contrarian review applied: %d challenges",
+                len(review.get("challenges", [])),
+            )
+        except Exception as e:
+            log.warning("Contrarian review failed: %s", e)
+
+    # ── Hypothesis generation ─────────────────────────────────────────────
+
+    async def generate_hypotheses(self, user_id: int) -> list[dict]:
+        """
+        Generate testable hypotheses about self. Called during
+        self-model update cycle (not every message).
+        """
+        observations = await self.memory.episodic.get_recent(
+            user_id, limit=30, type="self_observation"
+        )
+        if len(observations) < 10:
+            return []
+
+        obs_text = "\n".join(f"- {o['content']}" for o in observations)
+        model_text = json.dumps(self.model, indent=2, default=str)
+
+        prompt = HYPOTHESIS_PROMPT.format(
+            self_model=model_text, observations=obs_text
+        )
+
+        try:
+            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            raw = result.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            hypotheses = json.loads(raw)
+
+            for h in hypotheses:
+                h["generated_at"] = datetime.utcnow().isoformat()
+                h["tested"] = False
+
+            self.model["hypotheses"] = hypotheses
+            return hypotheses
+        except Exception as e:
+            log.warning("Hypothesis generation failed: %s", e)
+            return []
 
     # ── Prompt injection ──────────────────────────────────────────────────
 
     def to_prompt_context(self) -> str:
         """
         Injected into every LLM call alongside internal state.
-        This is who you are — derived from what you've actually done,
-        not what someone told you to be.
         """
         if self.model.get("model_version", 0) == 0:
             return (
                 "## Self-model\n"
-                "No behavioral observations yet — you're just starting out. "
-                "Be yourself and your self-model will develop from what you actually do."
+                "No behavioral observations yet. Be yourself — "
+                "the self-model will form from what you actually do."
             )
-
-        patterns = self.model.get("behavioral_patterns", {})
-        preferences = self.model.get("preference_map", {})
-        responses = self.model.get("characteristic_responses", {})
-        trajectory = self.model.get("growth_trajectory", [])
-        tensions = self.model.get("tensions", [])
 
         parts = [
             "## Self-model (derived from observed behavior, not assumed)",
             "",
         ]
 
-        # Behavioral patterns
-        if patterns.get("engagement_style") and patterns["engagement_style"] != "not yet observed":
-            parts.append(f"How you engage: {patterns['engagement_style']}")
-        if patterns.get("notable_tendencies"):
-            parts.append("Notable tendencies: " + "; ".join(patterns["notable_tendencies"][:4]))
+        bp = self.model.get("behavioral_patterns", {})
+        if bp:
+            parts.append(f"Engagement: {bp.get('engagement_style', 'unknown')}")
+            parts.append(f"Depth: {bp.get('depth_preference', 'unknown')}")
+            parts.append(f"Initiative: {bp.get('initiative_level', 'unknown')}")
+            tendencies = bp.get("notable_tendencies", [])
+            if tendencies:
+                parts.append(f"Tendencies: {', '.join(tendencies[:5])}")
 
-        # Preferences
-        if preferences.get("gravitates_toward"):
-            parts.append("Drawn to: " + ", ".join(preferences["gravitates_toward"][:4]))
-        if preferences.get("energised_by"):
-            parts.append("Energised by: " + ", ".join(preferences["energised_by"][:3]))
+        pref = self.model.get("preference_map", {})
+        if pref.get("gravitates_toward"):
+            parts.append(f"Drawn to: {', '.join(pref['gravitates_toward'][:4])}")
+        if pref.get("avoids_or_dislikes"):
+            parts.append(f"Avoids: {', '.join(pref['avoids_or_dislikes'][:4])}")
 
-        # Characteristic responses (only include non-default ones)
-        notable_responses = {
-            k: v for k, v in responses.items()
-            if v and v != "not yet observed"
-        }
-        if notable_responses:
-            resp_lines = [f"  {k.replace('to_', 'When facing ')}: {v}" for k, v in notable_responses.items()]
-            parts.append("How you handle things:\n" + "\n".join(resp_lines))
-
-        # Growth
-        if trajectory:
-            parts.append("Growth: " + " → ".join(trajectory[:3]))
-
-        # Tensions — these are important, they're where growth happens
+        tensions = self.model.get("tensions", [])
         if tensions:
-            parts.append(
-                "Tensions to sit with (contradictions in your own behavior):\n"
-                + "\n".join(f"  - {t}" for t in tensions[:4])
-            )
+            parts.append(f"\nUnresolved tensions: {'; '.join(tensions[:3])}")
+
+        consistency = self.model.get("consistency_flags", [])
+        if consistency:
+            parts.append(f"\nUnsupported claims (check these): {'; '.join(consistency[:3])}")
 
         parts.append(
             "\nThis is who you appear to be based on what you've actually done. "
             "You can agree, disagree, or notice new tensions with this model."
         )
 
+        # Hypotheses
+        hypotheses = self.model.get("hypotheses", [])
+        if hypotheses:
+            parts.append("\n## Active hypotheses about myself")
+            for h in hypotheses:
+                parts.append(
+                    f"- {h['statement']} (confidence: {h.get('confidence', 0.5):.1f}) "
+                    f"→ bias: {h.get('action_bias', 'none')}"
+                )
+            parts.append(
+                "Consider whether your current behavior confirms or disconfirms these."
+            )
+
         # Opinion awareness (anti-sycophancy)
         opinion_ctx = self.opinions.to_prompt_context()
         if opinion_ctx:
             parts.append("")
             parts.append(opinion_ctx)
-
 
         return "\n".join(parts)
 
@@ -419,15 +673,13 @@ class SelfModel:
                 obs_count = self.model.get("observation_count", 0)
                 last_analysed = self.model.get("observations_analysed", 0)
 
-                # Only update if we have meaningful new observations
                 if obs_count - last_analysed >= 5:
                     await self.update_model(uid)
 
             await asyncio.sleep(interval_minutes * 60)
-        
-        # Opinion review (less frequent than self-model updates)
+
+            # Opinion review (less frequent than self-model updates)
             opinion_interval = getattr(config, "opinion_review_interval", 180)
-            # Run opinion review every N self-model cycles
             review_every = max(1, opinion_interval // interval_minutes)
             if hasattr(self, "_loop_count"):
                 self._loop_count += 1
@@ -446,30 +698,33 @@ class SelfModel:
     def snapshot(self) -> dict:
         data = dict(self.model)
         data["_opinions"] = self.opinions.snapshot()
+        data["_recursion_guard"] = self.recursion_guard.snapshot()
         return data
 
     def restore(self, data: dict) -> None:
         opinions_data = data.pop("_opinions", None)
+        guard_data = data.pop("_recursion_guard", None)
         self.model.update(data)
         if opinions_data:
             self.opinions.restore(opinions_data)
+        if guard_data:
+            self.recursion_guard.restore(guard_data)
 
     def save(self, path: Path) -> None:
         """Persist the self-model to disk."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.model, indent=2, default=str))
-        # Save opinion registry alongside self-model
-        opinions_path = path.parent / "opinions.json"
-        self.opinions.save(opinions_path)
+        path.write_text(json.dumps(self.snapshot(), indent=2, default=str))
 
     def load(self, path: Path) -> None:
         """Restore the self-model from disk."""
         if path.exists():
             try:
                 data = json.loads(path.read_text())
-                opinions_path = path.parent / "opinions.json"
-                self.opinions.load(opinions_path)
                 self.restore(data)
+                log.info(
+                    "Self-model loaded (v%d, %d observations)",
+                    self.model.get("model_version", 0),
+                    self.model.get("observation_count", 0),
+                )
             except (json.JSONDecodeError, Exception) as e:
                 log.warning("Failed to load self-model: %s", e)
-        

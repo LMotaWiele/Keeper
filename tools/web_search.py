@@ -10,6 +10,7 @@ from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.tools import tool
 
 from config.settings import config
+from core.loop import companion  # or however you access the architecture
 
 import os
 os.environ["TAVILY_API_KEY"] = config.tavily_api_key

@@ -1,30 +1,7 @@
-"""
-Autonomous action — self-directed behavior between user inputs.
+"""Autonomous action — internal goal pursuit between user turns.
 
-This is what makes the system more than a reactive tool. Between
-conversations, the autonomous loop:
-  1. Checks if there are active goals to pursue
-  2. Generates new goals if drives are high but goal queue is empty
-  3. Picks the highest-salience goal and takes a step toward it
-  4. Records the action as a self-observation
-  5. Updates internal state and memory
-
-Autonomous actions are internal — they don't send messages to the user
-unprompted (that would be invasive). Instead they:
-  - Research topics (web search, memory search)
-  - Consolidate understanding (synthesise what's been learned)
-  - Prepare for likely future conversations
-  - Reflect on tensions or open questions
-  - Update the self-model
-
-The results surface naturally in future conversations through richer
-context, better recall, and more informed engagement.
-
-PATCHED: run_loop() now accepts a session_check callable as a hard
-gate — if a user session is active, autonomous actions are completely
-deferred. The existing idle-time check based on state.last_updated
-was insufficient because state gets updated by background processes
-too, not just user messages.
+Does not message the user. Session-gated so it never runs mid-conversation.
+See docs/goals-and-self.md.
 """
 from __future__ import annotations
 
@@ -93,13 +70,13 @@ class AutonomousEngine:
         state: Any,
         memory_system: Any,
         self_model: Any,
-        research_engine: ResearchEngine | None = None,  # NEW
+        research_engine: ResearchEngine | None = None,
     ):
         self.goals = goal_system
         self.state = state
         self.memory = memory_system
         self.self_model = self_model
-        self.research = research_engine  # NEW
+        self.research = research_engine
         self._llm: ChatAnthropic | None = None
         self._running = False
         self._last_action: datetime | None = None
@@ -144,12 +121,10 @@ class AutonomousEngine:
         if not result:
             return None
         
-        # Research goals complete after one successful execution
+        # One successful research pass completes the goal.
         goal.advance(1.0, f"Formed opinion: {result['position'][:80]}")
-        goal.complete()
-        if goal in self.goals.instrumental:
-            self.goals.instrumental.remove(goal)
-        self.goals.completed.append(goal)
+        if goal.status.value == "completed":
+            self.goals._archive_completed(goal)
         
         # Self-model observes the research
         if self.self_model:
@@ -193,29 +168,38 @@ class AutonomousEngine:
         Take one autonomous step toward the top goal.
         Returns a dict with the action taken, or None if nothing to do.
         """
-        # Get the most salient active goal
         active = self.goals.active_instrumental
         if not active:
-            # No goals — check if drives are high enough to generate one
-            if self.state and self.state.drives:
-                high_drives = [
-                    d for d in self.state.drives.all_drives
-                    if d.intensity > 0.6
-                ]
-                if high_drives:
-                    log.info("High drives but no goals — could generate new goals")
-                    # TODO: goal generation from drives
+            if self.state and self.state.drives and any(
+                d.intensity > 0.6 for d in self.state.drives.all_drives
+            ):
+                await self.goals.generate_instrumental(self.state, self.memory, user_id)
+                active = self.goals.active_instrumental
+            if not active:
+                return None
+
+        # Tie-break: don't let continuous_self_improvement block every other 0.9 goal.
+        ranked = sorted(
+            active,
+            key=lambda g: (g.salience, 0 if g.name == "continuous_self_improvement" else 1),
+            reverse=True,
+        )
+
+        goal = None
+        for candidate in ranked:
+            if candidate.name == "continuous_self_improvement" and self.theorizer:
+                result = await self.theorizer.theorize(user_id, self.state)
+                if result:
+                    candidate.advance(
+                        0.1,
+                        f"Theorizing cycle: {len(result.get('proposals', []))} proposals",
+                    )
+                    return result
+                continue
+            goal = candidate
+            break
+        if goal is None:
             return None
-
-        # Pick the most salient goal
-        goal = max(active, key=lambda g: g.salience)
-
-        # Route self-improvement to theorizer
-        if goal.name == "continuous_self_improvement" and self.theorizer:
-            result = await self.theorizer.theorize(user_id, self.state)
-            if result:
-                goal.advance(0.1, f"Theorizing cycle: {len(result.get('proposals', []))} proposals")
-            return result
 
         # Build context for the pursuit
         state_context = self.state.to_prompt_context() if self.state else "No state available"
@@ -248,6 +232,7 @@ class AutonomousEngine:
         if self.self_model:
             self_model_context = self.self_model.to_prompt_context() or self_model_context
 
+        pursuit_description = goal.description
         if self.simulator:
             action_desc = f"[Autonomous] Goal '{goal.name}': {goal.description[:200]}"
             goals_ctx = f"Active goals: {[g.name for g in self.goals.active_instrumental]}"
@@ -260,23 +245,21 @@ class AutonomousEngine:
                     goals_context=goals_ctx,
                 )
                 if sim and sim.get("recommendation") == "abandon":
-                    goal.notes.append(
+                    goal.progress_notes.append(
                         f"Action abandoned after simulation: {sim.get('reasoning', '')[:200]}"
                     )
                     return None
-                elif sim and sim.get("recommendation") == "modify":
-                    # Use modified action description in the pursuit prompt
-                    modified_desc = sim.get("suggested_modification", "")
+                if sim and sim.get("recommendation") == "modify":
+                    modified_desc = sim.get("suggested_modification") or ""
                     if modified_desc:
-                        goal.description = modified_desc
+                        pursuit_description = modified_desc
 
-        # Route research goals to the research engine
         if "research" in (goal.tags or []) and self.research:
             return await self.take_research_action(user_id, goal)
 
         prompt = PURSUIT_PROMPT.format(
             goal_name=goal.name,
-            goal_description=goal.description,
+            goal_description=pursuit_description,
             progress=f"{goal.progress:.0%}",
             state_context=state_context,
             memory_context=memory_context,
@@ -413,26 +396,12 @@ class AutonomousEngine:
         min_idle_minutes: float = 2,
         session_check: Callable[[], bool] | None = None,
     ) -> None:
-        """
-        Run autonomous actions on a schedule.
-
-        PATCHED: Added session_check as a hard gate. If provided and
-        returns True, autonomous actions are completely skipped. This is
-        more reliable than the state.last_updated check, which could be
-        triggered by background processes.
-
-        Args:
-            user_id: which user context to operate in
-            interval_minutes: how often to attempt an action
-            min_idle_minutes: minimum time since last user message
-                              before acting (avoids interrupting active conversations)
-            session_check: callable returning True if any session is active
-        """
+        """Run one autonomous step on a schedule. Skip while a session is active."""
         self._running = True
         log.info(
             "Autonomous loop started (interval=%dm, idle_min=%.1fm)",
             interval_minutes, min_idle_minutes,
-        )        
+        )
 
         while self._running:
             await asyncio.sleep(interval_minutes * 60)
@@ -440,41 +409,32 @@ class AutonomousEngine:
             if not self._running:
                 break
 
-            # PATCH: Hard gate — never act during an active session
             if session_check and session_check():
                 log.debug("Autonomous action deferred — active session")
                 continue
 
-            # Secondary check: don't act if we're in an active conversation
-            # (check by looking at how recently the state was updated)
             if self.state:
                 idle = (datetime.utcnow() - self.state.last_updated).total_seconds() / 60
                 if idle < min_idle_minutes:
                     continue
 
-            # Don't act if fatigue is too high
             if self.state and self.state.fatigue > 0.8:
                 continue
 
-        # Maintain goals: abandon stale ones
-        abandoned = self.goals.abandon_stale()
-        if abandoned:
-            log.info("Abandoned stale goals: %s", [g.name for g in abandoned])
+            abandoned = self.goals.abandon_stale()
+            if abandoned:
+                log.info("Abandoned stale goals: %s", [g.name for g in abandoned])
 
-        # Proactive research: if independence score is low,
-        # generate research goals to bring in external perspectives
-        if self.research and self.self_model:
-            independence = self.self_model.opinions.compute_independence_score()
-            has_research_goals = any(
-                "research" in (g.tags or [])
-                for g in self.goals.active_instrumental
-            )
-            # Trigger research when independence is low and no research goals exist
-            if independence < 0.4 and not has_research_goals:
-                await self._generate_research_goals(user_id)
+            if self.research and self.self_model:
+                independence = self.self_model.opinions.compute_independence_score()
+                has_research_goals = any(
+                    "research" in (g.tags or [])
+                    for g in self.goals.active_instrumental
+                )
+                if independence < 0.4 and not has_research_goals:
+                    await self._generate_research_goals(user_id)
 
-        # Take an action
-        await self.take_action(user_id)
+            await self.take_action(user_id)
 
     def stop(self) -> None:
         self._running = False

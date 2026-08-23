@@ -1,12 +1,4 @@
-"""
-Codebase self-knowledge — lets Keeper understand its own structure.
-
-NOT loaded on every prompt (too expensive). Called when:
-  - Self-model update runs (so the model is grounded in reality)
-  - An action involves reasoning about its own capabilities
-  - User asks about Keeper's architecture
-  - Self-improvement goal generates proposals
-"""
+"""Codebase index — AST map of this repo. Injected only when self-reflection needs it."""
 from __future__ import annotations
 
 import ast

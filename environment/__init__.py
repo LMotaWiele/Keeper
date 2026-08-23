@@ -1,11 +1,4 @@
-"""
-Environment — grounding the system in something beyond conversations.
-
-Exports:
-  - EnvironmentalGrounding: the main polling loop and orchestrator
-  - TimeSense: subjective temporal awareness
-  - Streams: BaseStream, TimeStream, RSSStream, OutputHistoryStream, SystemHealthStream
-"""
+"""Environment — grounding streams, time sense, future simulation."""
 from environment.grounding import EnvironmentalGrounding
 from environment.time_sense import TimeSense
 from environment.streams import (

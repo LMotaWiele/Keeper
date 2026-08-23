@@ -1,20 +1,4 @@
-"""
-Memory consolidator — the bridge between episodic and semantic memory.
-
-Runs periodically (not on every message) and does three things:
-  1. Extracts patterns from recent episodic memories using the LLM
-  2. Stores crystallised patterns in semantic memory
-  3. Applies decay + forgetting to episodic memory
-
-This mirrors biological memory consolidation — experiences don't stay
-as raw episodes forever. The important patterns get abstracted into
-stable knowledge, and the episodes themselves gradually fade unless
-they're emotionally significant or frequently recalled.
-
-PATCHED: run_loop() now accepts a session_check callable and skips
-consolidation cycles when a user session is active. This prevents
-background memory operations from interfering with live conversations.
-"""
+"""Consolidator — episodic → semantic patterns, plus decay. Skipped while a session is active."""
 from __future__ import annotations
 
 import asyncio
@@ -110,10 +94,10 @@ class MemoryConsolidator:
     def llm(self) -> ChatAnthropic:
         if self._llm is None:
             self._llm = ChatAnthropic(
-                model_name=config.llm_model,
-                api_key=config.anthropic_api_key,
-                temperature=0.3,   # low temp for analytical extraction
-                max_tokens_to_sample=2048,
+                model=config.llm_model,
+                anthropic_api_key=config.anthropic_api_key,
+                temperature=0.3,
+                max_tokens=2048,
             )
         return self._llm
 
@@ -136,9 +120,11 @@ class MemoryConsolidator:
         }
 
         try:
-                       # Conditional consolidation — skip if no new memories
             new_count = episodic.new_episodes_since_consolidation(user_id)
-            if new_count < 3:
+            tracked = user_id in episodic._new_since_consolidation
+            # Skip LLM extract only when we have a live counter and it is still small.
+            # After restart the counter is empty — still consolidate leftover episodes.
+            if tracked and new_count < 3:
                 log.debug(
                     "Skipping consolidation for user %s: only %d new episodes",
                     user_id, new_count,
@@ -293,15 +279,7 @@ class MemoryConsolidator:
         interval_minutes: int = 30,
         session_check: Callable[[], bool] | None = None,
     ) -> None:
-        """
-        Run consolidation on a schedule for all known users.
-        Designed to be started as a background task.
-
-        PATCHED: accepts session_check callable. If provided and it
-        returns True (session active), the cycle is deferred — we don't
-        want consolidation (especially decay/forgetting) running while
-        the user is mid-conversation.
-        """
+        """Periodic consolidation. `session_check` defers work during live conversation."""
         self._running = True
         log.info(
             "Consolidation loop started (interval=%dm, users=%s)",
@@ -309,7 +287,6 @@ class MemoryConsolidator:
         )
 
         while self._running:
-            # PATCH: Skip if any session is active
             if session_check and session_check():
                 log.debug("Consolidation deferred — active session detected")
                 await asyncio.sleep(interval_minutes * 60)

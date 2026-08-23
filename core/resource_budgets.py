@@ -1,9 +1,4 @@
-"""
-Resource budgets — tie internal drives to real resource constraints.
-
-Curiosity controls search willingness. Fatigue tracks API spend.
-Both reset daily at midnight UTC.
-"""
+"""Resource budgets — curiosity-scaled search quota and API spend → fatigue. Daily reset."""
 from __future__ import annotations
 
 from dataclasses import dataclass

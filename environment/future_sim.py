@@ -1,9 +1,4 @@
-"""
-Future simulation — anticipatory reasoning before actions.
-
-Gated by importance threshold to avoid simulating trivial actions.
-Adds a "what might happen if I do X" step to the processing pipeline.
-"""
+"""Future simulation — gated 'what if' before high-stakes autonomous actions."""
 from __future__ import annotations
 
 import json

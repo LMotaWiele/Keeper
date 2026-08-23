@@ -1,21 +1,4 @@
-"""
-Intrinsic goal structures — Pillar 4 of The_core architecture.
-
-This is what gives the system genuine agency rather than pure reactivity.
-
-Two levels:
-  Terminal goals  — deep persistent orientations that never complete.
-                    They provide directional pull: "understand deeply",
-                    "create something meaningful", "resolve open questions".
-
-  Instrumental goals — specific pursuits generated in service of terminal
-                       goals. These can be completed, abandoned, or
-                       deprioritised. They're the actionable layer.
-
-The goal system generates behavior autonomously — not just responding
-to inputs but occasionally initiating based on active drives and
-unresolved threads in memory.
-"""
+"""Goal system — terminal orientations plus completable instrumental goals. See docs/goals-and-self.md."""
 from __future__ import annotations
 
 import json
@@ -164,6 +147,7 @@ class Goal:
             "last_pursued": self.last_pursued.isoformat() if self.last_pursued else None,
             "tags": self.tags,
             "context": self.context[:200],
+            "permanent": self.permanent,
         }
 
     @classmethod
@@ -180,6 +164,7 @@ class Goal:
             progress_notes=d.get("progress_notes", []),
             tags=d.get("tags", []),
             context=d.get("context", ""),
+            permanent=d.get("permanent", False) or "permanent" in d.get("tags", []),
         )
         if d.get("created_at"):
             g.created_at = datetime.fromisoformat(d["created_at"])
@@ -455,12 +440,26 @@ class GoalSystem:
             log.warning("Goal generation failed: %s", e)
 
         return new_goals
-    
-# ── Permanent goals management ─────────────────────────────────────────      
+
     async def init_permanent_goals(self):
-        """Called on startup. Ensures permanent goals exist and are active."""
+        """Ensure permanent goals exist, are flagged, and stay active."""
         for goal_def in PERMANENT_GOALS:
             existing = self.get_by_name(goal_def["name"])
+            if existing is None:
+                existing = next(
+                    (g for g in self.completed + self.abandoned if g.name == goal_def["name"]),
+                    None,
+                )
+                if existing is not None:
+                    if existing in self.completed:
+                        self.completed.remove(existing)
+                    if existing in self.abandoned:
+                        self.abandoned.remove(existing)
+                    existing.status = GoalStatus.ACTIVE
+                    existing.permanent = True
+                    if "permanent" not in existing.tags:
+                        existing.tags.append("permanent")
+                    self.instrumental.append(existing)
             if existing is None:
                 goal = Goal(
                     id=f"pg_{uuid.uuid4().hex[:8]}",
@@ -469,15 +468,19 @@ class GoalSystem:
                     tags=goal_def["tags"],
                     salience=0.9,
                     progress=0.0,
+                    permanent=True,
                 )
-                goal.permanent = True
                 self.instrumental.append(goal)
-            elif existing.progress >= 0.95:
-                existing.progress = 0.3
-                existing.progress_notes.append(
-                    f"Cycle reset at {datetime.utcnow().isoformat()} — "
-                    "generating new sub-objectives"
-                )
+            else:
+                existing.permanent = True
+                if "permanent" not in existing.tags:
+                    existing.tags.append("permanent")
+                if existing.progress >= 0.95:
+                    existing.progress = 0.3
+                    existing.progress_notes.append(
+                        f"Cycle reset at {datetime.utcnow().isoformat()} — "
+                        "generating new sub-objectives"
+                    )
 
     # ── Progress evaluation ───────────────────────────────────────────────
 
@@ -551,17 +554,20 @@ class GoalSystem:
         log.info("Goal completed: %s (%s)", goal.name, goal.id)
 
     def abandon_stale(self, max_stale_hours: float = 48) -> list[Goal]:
-        """Abandon goals that have gone stale (not pursued in N hours)."""
+        """Abandon unused instrumental goals. Permanent goals never go stale."""
         abandoned = []
-        for goal in self.active_instrumental:
-            if goal.is_stale:
-                ref_time = goal.last_pursued or goal.created_at
-                hours = (datetime.utcnow() - ref_time).total_seconds() / 3600
-                if hours > max_stale_hours:
-                    goal.abandon(f"Stale for {hours:.0f} hours")
-                    self.instrumental.remove(goal)
-                    self.abandoned.append(goal)
-                    abandoned.append(goal)
+        for goal in list(self.active_instrumental):
+            if goal.permanent or "permanent" in (goal.tags or []):
+                continue
+            if not goal.is_stale:
+                continue
+            ref_time = goal.last_pursued or goal.created_at
+            hours = (datetime.utcnow() - ref_time).total_seconds() / 3600
+            if hours > max_stale_hours:
+                goal.abandon(f"Stale for {hours:.0f} hours")
+                self.instrumental.remove(goal)
+                self.abandoned.append(goal)
+                abandoned.append(goal)
         return abandoned
 
     def deprioritise(self, goal_id: str, amount: float = 0.2) -> None:

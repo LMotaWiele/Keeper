@@ -1,10 +1,4 @@
-"""
-Memory tools — let the agent explicitly read/write its own memory layers.
-
-Updated to use the new episodic + semantic memory system.
-The agent can now store facts with emotional weight, search semantic
-patterns, and recall with state-aware retrieval.
-"""
+"""Memory tools — explicit fact/preference/semantic read-write for the agent."""
 from __future__ import annotations
 
 from langchain_core.tools import tool

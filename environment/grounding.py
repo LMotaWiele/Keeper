@@ -1,30 +1,15 @@
-"""
-Environmental grounding — Pillar 3 of The_core architecture.
-
-The system needs an ongoing relationship with something beyond
-conversations. Without this it only exists when prompted — which is
-closer to a tool than a being.
-
-The grounding loop runs continuously in the background, polling all
-registered streams and routing their events through internal state
-and memory. It's the thing that makes "time passes" real rather
-than abstract.
-
-Responsibilities:
-  1. Poll registered streams on their individual schedules
-  2. Assess salience of incoming events (using state context)
-  3. Route salient events into memory and internal state
-  4. Maintain the time sense between sessions
-  5. Provide environmental context for the system prompt
-"""
+"""Environmental grounding — background streams so the system exists between turns."""
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
-from core.events import Event, StreamUpdateEvent, TimePassingEvent
+from config.settings import config
+
+from core.events import Event, SessionEndEvent, StreamUpdateEvent, TimePassingEvent
 from environment.streams import (
     BaseStream,
     TimeStream,
@@ -38,13 +23,7 @@ log = logging.getLogger(__name__)
 
 
 class EnvironmentalGrounding:
-    """
-    Orchestrates all environmental streams into a coherent grounding layer.
-
-    The grounding loop runs on a background asyncio task, polling streams
-    at their configured intervals. Events above the salience threshold
-    get stored in memory and pushed through internal state.
-    """
+    """Poll streams, route salient events into state and memory."""
 
     def __init__(
         self,
@@ -56,12 +35,12 @@ class EnvironmentalGrounding:
         self.memory = memory_system
         self.salience_threshold = salience_threshold
 
-        # Time sense — always present
         self.time_sense = TimeSense()
-
-        # Built-in streams
-        self.time_stream = TimeStream()
+        self.time_stream = TimeStream(
+            session_timeout_minutes=config.session_timeout_minutes,
+        )
         self.health_stream = SystemHealthStream()
+        self.on_session_end_cb: Callable[[int, int], None] | None = None
 
         # All registered streams
         self.streams: list[BaseStream] = [
@@ -152,11 +131,15 @@ class EnvironmentalGrounding:
         salience = self.assess_salience(event)
         self._events_processed += 1
 
-        # Always update internal state (even low-salience events shift it subtly)
         if self.state:
             self.state.update(event)
 
-        # Only store in memory if above threshold
+        if isinstance(event, SessionEndEvent):
+            self.time_sense.end_session(event.messages_exchanged)
+            if self.on_session_end_cb:
+                self.on_session_end_cb(user_id, event.messages_exchanged)
+
+        # Store only above threshold so idle time-passing does not flood memory.
         if salience >= self.salience_threshold and self.memory:
             content = self._event_to_content(event)
             if content:
@@ -221,7 +204,7 @@ class EnvironmentalGrounding:
         if self._task is not None and not self._task.done():
             return  # already running
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         self._task = loop.create_task(self.run_loop(user_id))
         log.info("Grounding loop task started")
 
@@ -307,5 +290,4 @@ class EnvironmentalGrounding:
                 log.warning("Failed to load grounding state: %s", e)
 
 
-# Import Path at module level for type hints
-from pathlib import Path
+

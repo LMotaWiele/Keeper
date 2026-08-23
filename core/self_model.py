@@ -1,34 +1,4 @@
-"""
-Recursive self-model — Pillar 5 of The_core architecture.
-
-The most architecturally novel component. A separate process that observes
-the system's behavior over time and builds an evolving model of it —
-which then gets fed back in as self-knowledge.
-
-This is NOT a static identity prompt ("you are curious and thoughtful").
-It's a dynamically updated model derived from actual observed behavior.
-The system learns who it is by watching what it does.
-
-The model tracks:
-  - behavioral_patterns:       how the system tends to engage
-  - preference_map:            what it gravitates toward vs avoids
-  - characteristic_responses:  signature ways it handles situations
-  - growth_trajectory:         how it has changed over time
-  - tensions:                  unresolved internal contradictions
-  - hypotheses:                testable predictions about own behavior
-
-The update loop runs periodically (not every message), analysing
-recent self-observations stored in episodic memory and using the LLM
-to derive patterns. The resulting model is injected into every LLM call
-alongside the internal state — so the system knows who it is while
-it's deciding what to do.
-
-MODIFIED (Keeper Modifications Spec):
-  - Added CodebaseIndex integration for structural self-knowledge
-  - Added hypothesis generation (self-model biases goals/actions)
-  - Added RecursionGuard with diversity tracking and stagnation detection
-  - Multi-layer update: observation → consistency check → contrarian review
-"""
+"""Self-model — identity derived from observed behavior, not a static persona. See docs/goals-and-self.md."""
 from __future__ import annotations
 
 import asyncio
@@ -396,16 +366,13 @@ class SelfModel:
         Layer 3: Contrarian challenge when stagnant
 
         Then generate hypotheses for goal/action biasing.
-
-        !!!Avoid apostrophes in contractions, or to use a simpler structure that doesn't require them, to reduce the chances of the LLM generating malformed JSON.!!!
         """
         if self.memory is None:
             return self.model
 
-        # Layer 1: Standard observation-based update
-        await self._layer1_observation_update(user_id)
-
-        # Record for diversity tracking
+        updated = await self._layer1_observation_update(user_id)
+        if not updated:
+            return self.model
         self.recursion_guard.record_model(self.model)
 
         # Layer 2: Consistency check (every other cycle)
@@ -422,15 +389,15 @@ class SelfModel:
 
         return self.model
 
-    async def _layer1_observation_update(self, user_id: int) -> None:
-        """Analyse accumulated self-observations and rebuild the model."""
+    async def _layer1_observation_update(self, user_id: int) -> bool:
+        """Analyse accumulated self-observations and rebuild the model. True if the model changed."""
         observations = await self.memory.episodic.get_recent(
             user_id, limit=50, type="self_observation"
         )
 
         if len(observations) < 5:
             log.info("Not enough observations to update self-model (%d)", len(observations))
-            return
+            return False
 
         obs_text = "\n".join(
             f"[{i+1}] {obs['content']}"
@@ -490,11 +457,13 @@ class SelfModel:
                 type="event",
                 tags=["self_model", "meta"],
             )
+            return True
 
         except json.JSONDecodeError as e:
             log.warning("Self-model update failed to parse: %s", e)
         except Exception as e:
             log.exception("Self-model update failed: %s", e)
+        return False
 
     async def _layer2_consistency_check(self, user_id: int) -> None:
         """Does the model's claims match recent actual behavior?"""

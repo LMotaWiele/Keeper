@@ -1,17 +1,4 @@
-"""
-Memory system — unified interface across all three layers.
-
-Usage:
-    from memory import memory_system
-
-    await memory_system.init()
-    await memory_system.store_episode(content, internal_state, salience)
-    results = await memory_system.recall(query, current_state)
-    await memory_system.consolidate(user_id)
-
-This wraps working, episodic, and semantic memory into a single
-coherent API matching the architecture described in The_core.
-"""
+"""Memory facade — working + episodic + semantic + consolidator. See docs/memory.md."""
 from __future__ import annotations
 
 from datetime import datetime

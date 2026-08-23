@@ -1,17 +1,4 @@
-"""
-Time sense — subjective temporal awareness.
-
-Goes beyond clock time to give the system a felt sense of duration,
-rhythm, and temporal context. This is what makes the difference between
-"it is 14:32 UTC" and "we've been talking for a while, it's getting
-late, and it's been three days since we last discussed your project."
-
-Tracks:
-  - Session rhythms: how often the user shows up, typical session lengths
-  - Conversation tempo: message frequency within sessions
-  - Temporal landmarks: notable events pinned to time
-  - Subjective duration: time feels faster when engaged, slower when idle
-"""
+"""Time sense — session rhythm and subjective duration, not just clock time."""
 from __future__ import annotations
 
 import json
@@ -283,8 +270,8 @@ class TimeSense:
         parts = []
 
         # Time of day
-        now = datetime.now()
-        parts.append(f"It's {now.strftime('%A')} {now.strftime('%H:%M')}, {self._time_of_day()}")
+        now = datetime.utcnow()
+        parts.append(f"It's {now.strftime('%A')} {now.strftime('%H:%M')} UTC, {self._time_of_day()}")
 
         # Session gap
         subjective = self.subjective_time_since_last
@@ -312,7 +299,7 @@ class TimeSense:
         return " | ".join(parts)
 
     def _time_of_day(self) -> str:
-        hour = datetime.now().hour
+        hour = datetime.utcnow().hour
         if hour < 6:
             return "late night"
         elif hour < 12:

@@ -1,9 +1,4 @@
-"""
-Configuration — env-driven settings for the entire companion.
- 
-Loads from .env via python-dotenv. All paths are resolved relative to
-the project root unless absolute paths are given.
-"""
+"""Env-driven settings. Paths resolve relative to the project root unless absolute."""
 from __future__ import annotations
  
 import os
@@ -44,7 +39,7 @@ class Settings:
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
  
     # ── Paths ─────────────────────────────────────────────────────────────
-    data_dir: str = os.getenv("DATA_DIR", "./data")
+    data_dir: Path = _path("DATA_DIR", "./data")
     soul_file_path: Path = _path("SOUL_FILE_PATH", "./SOUL.md")
     midterm_db_path: Path = _path("MIDTERM_DB_PATH", "./data/episodic.db")
     chroma_db_path: Path = _path("CHROMA_DB_PATH", "./data/chroma")
@@ -61,15 +56,15 @@ class Settings:
     max_tracked_opinions: int = int(os.getenv("MAX_TRACKED_OPINIONS", "100"))
 
     # ── Session ───────────────────────────────────────────────────────────
-    session_timeout_minutes: float = float(os.getenv("SESSION_TIMEOUT_MIN", "15"))
+    session_timeout_minutes: float = float(os.getenv("SESSION_TIMEOUT_MIN", "60"))
     working_memory_capacity: int = int(os.getenv("WORKING_MEMORY_CAPACITY", "20"))
  
     def ensure_dirs(self) -> None:
         """Create data directories if they don't exist."""
-        Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.midterm_db_path.parent.mkdir(parents=True, exist_ok=True)
-        Path(self.chroma_db_path).parent.mkdir(parents=True, exist_ok=True)
-        (Path(self.data_dir) / "state").mkdir(parents=True, exist_ok=True)
+        self.chroma_db_path.parent.mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "state").mkdir(parents=True, exist_ok=True)
 
 
  

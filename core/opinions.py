@@ -1,27 +1,4 @@
-"""
-Opinion Registry — anti-sycophancy infrastructure for the self-model.
-
-Tracks what Keeper believes, where those beliefs came from, and whether
-they're drifting toward pure mirroring of the user.
-
-Every opinion is tagged with its origin:
-  - INDEPENDENT:    arrived at through own reasoning
-  - EXTERNAL:       formed from web search / RSS / external source
-  - ADOPTED:        taken from the user during conversation
-  - COLLABORATIVE:  developed jointly with the user
-  - CONTESTED:      held despite user disagreement
-  - UNKNOWN:        origin unclear (legacy or untracked)
-
-The registry computes an independence score and emits sycophancy alerts
-when mirroring patterns emerge. These get injected into the system prompt
-alongside the rest of the self-model.
-
-Integration points:
-  - SelfModel.observe() calls detect_opinions() after each response
-  - SelfModel.to_prompt_context() includes opinion awareness
-  - The autonomous engine can pursue research goals that form EXTERNAL opinions
-  - The background loop periodically reviews and stress-tests existing opinions
-"""
+"""Opinion registry — origin-tagged stances plus an independence score. See docs/goals-and-self.md."""
 from __future__ import annotations
 
 import hashlib
@@ -346,7 +323,7 @@ class OpinionRegistry:
         # Enforce max capacity — drop lowest-conviction opinions
         max_opinions = getattr(config, "max_tracked_opinions", 100)
         if len(self.opinions) > max_opinions:
-            self._prune()
+            self._prune(protect=opinion.id)
 
         # Store as episodic memory
         if self.memory:
@@ -437,14 +414,18 @@ class OpinionRegistry:
             try:
                 related = await self.memory.episodic.get_recent(
                     user_id,
-                    limit=5,
-                    type=None,  # any type
+                    limit=20,
+                    type=None,
                 )
-                # Filter for relevance (basic keyword overlap)
-                domain_words = set(opinion.domain.lower().split("_"))
+                if after:
+                    related = [
+                        m for m in related
+                        if (m.get("created_at") or "") > after
+                    ]
+                domain_words = set(opinion.domain.lower().replace("_", " ").split())
                 related = [
                     m for m in related
-                    if any(w in m.get("content", "").lower() for w in domain_words)
+                    if any(w in m.get("content", "").lower() for w in domain_words if len(w) > 2)
                 ]
             except Exception:
                 continue
@@ -712,15 +693,14 @@ class OpinionRegistry:
         max_possible = min(len(words_a), len(words_b))
         return (overlap / max_possible) > 0.5 if max_possible > 0 else True
 
-    def _prune(self) -> None:
-        """Remove lowest-conviction opinions to stay under max capacity."""
+    def _prune(self, protect: str | None = None) -> None:
+        """Drop lowest-conviction opinions. `protect` is never deleted this pass."""
         max_opinions = getattr(config, "max_tracked_opinions", 100)
         if len(self.opinions) <= max_opinions:
             return
 
-        # Sort by conviction, drop the weakest
         by_conviction = sorted(
-            self.opinions.items(),
+            ((oid, op) for oid, op in self.opinions.items() if oid != protect),
             key=lambda kv: kv[1].conviction,
         )
         to_remove = len(self.opinions) - max_opinions

@@ -1,18 +1,4 @@
-"""
-Episodic memory — richly annotated experience store.
-
-Replaces the old mid_term.py. Each episode now carries:
-  - emotional_weight  → derived from internal state at encoding time
-  - state_snapshot    → what the system's internal state looked like
-  - recall_count      → how many times this memory has been retrieved
-  - last_recalled_at  → when it was last retrieved
-  - decay_rate        → per-episode decay speed (high-emotion = slow decay)
-  - associations      → JSON list of related episode IDs
-
-The key insight from The_core: *forgetting is a feature, not a bug.*
-Memories decay based on emotional weight, recall frequency, and recency.
-What gets remembered shapes identity.
-"""
+"""Episodic memory — SQLite experiences with decay. Forgetting is intentional; see docs/memory.md."""
 from __future__ import annotations
 
 import json
@@ -25,7 +11,10 @@ import aiosqlite
 
 from config.settings import config
 
-EpisodeType = Literal["summary", "fact", "event", "preference", "note", "self_observation"]
+EpisodeType = Literal[
+    "summary", "fact", "event", "preference", "note",
+    "self_observation", "opinion", "research",
+]
 
 
 SCHEMA = """

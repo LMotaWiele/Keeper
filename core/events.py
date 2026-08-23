@@ -1,16 +1,4 @@
-"""
-Events — typed signals that flow through the system.
-
-Every state change is triggered by an event. This gives us a clean
-vocabulary for what happened, which the internal state, memory system,
-and self-model can all react to independently.
-
-Events come from:
-  - The user (messages, commands)
-  - The system itself (tool results, autonomous actions)
-  - The environment (time passing, stream updates)
-  - Goals (progress, completion, frustration)
-"""
+"""Typed events — the shared vocabulary for state, memory, and self-model updates."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

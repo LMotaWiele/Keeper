@@ -1,23 +1,4 @@
-"""
-Drive system — internal motivational hungers.
-
-Drives are persistent urges that build up over time and get satisfied
-(temporarily) by specific kinds of activity. They're the bridge between
-internal state and the goal system — drives create motivation,
-goals channel it into action.
-
-Unlike emotions (arousal, valence) which react to what's happening,
-drives accumulate in the background. An unresolved question keeps
-nagging. An unexplored topic keeps pulling. A long silence builds
-the urge to reach out.
-
-Each drive has:
-  - intensity: how strong the urge is right now (0–1)
-  - buildup_rate: how fast it accumulates when unsatisfied
-  - decay_rate: how fast it fades after being satisfied
-  - last_satisfied: when it was last addressed
-  - description: what the drive is about (can be dynamic)
-"""
+"""Drive system — background hungers that goals channel into action. Affect reacts; drives accumulate."""
 from __future__ import annotations
 
 import json
@@ -118,6 +99,12 @@ class DriveSystem:
                 description="Pursue open questions and unresolved tensions",
                 buildup_rate=0.007,
                 tags=["intellectual"],
+            ),
+            Drive(
+                name="express",
+                description="Say something of your own rather than only answering",
+                buildup_rate=0.004,
+                tags=["creative"],
             ),
         ]
 

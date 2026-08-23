@@ -1,26 +1,4 @@
-"""
-Environmental streams — sources of grounding beyond conversation.
-
-Each stream polls an external or internal source and yields events
-when something noteworthy happens. The grounding loop consumes these
-events and routes them through state + memory.
-
-Streams included:
-  - TimeStream:          clock time, session gaps, time-of-day awareness
-  - RSSStream:           external information feeds
-  - OutputHistoryStream: the system's own recent behavior
-  - SystemHealthStream:  computational self-awareness (disk, memory, uptime)
-
-Adding a new stream: subclass BaseStream, implement poll(), done.
-
-PATCHED:
-  - TimeStream session_timeout_minutes increased from 15 to 60 minutes.
-    15 minutes was far too aggressive — natural conversation pauses
-    (thinking, doing something else, getting coffee) were triggering
-    false session ends that wiped conversational context.
-  - SessionEndEvent is now only fired once per actual session end
-    (added _end_event_fired guard to prevent repeated firing)
-"""
+"""Environmental streams — time, RSS, output history, system health. Subclass BaseStream to add one."""
 from __future__ import annotations
 
 import asyncio
@@ -28,6 +6,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -89,15 +68,13 @@ class TimeStream(BaseStream):
     Also provides contextual time awareness: time of day, day of week,
     how long since the last interaction.
 
-    PATCHED: session_timeout_minutes default changed from 15 to 60.
-    Added _end_event_fired guard so SessionEndEvent only fires once
-    per session end, not on every poll after timeout.
+    Silence timeout comes from config (default 60m) so coffee breaks are not session ends.
     """
 
     def __init__(
         self,
         poll_interval_seconds: float = 60,
-        session_timeout_minutes: float = 60,  # PATCHED: was 15, now 60
+        session_timeout_minutes: float = 60,
     ):
         super().__init__("time", poll_interval_seconds)
         self._session_timeout = session_timeout_minutes
@@ -105,7 +82,7 @@ class TimeStream(BaseStream):
         self._session_active = False
         self._session_start: datetime | None = None
         self._session_message_count = 0
-        self._end_event_fired = False  # PATCH: prevent repeated SessionEndEvents
+        self._end_event_fired = False
 
     def record_user_activity(self) -> None:
         """Called by the bot when the user sends a message."""
@@ -116,7 +93,7 @@ class TimeStream(BaseStream):
             self._session_active = True
             self._session_start = now
             self._session_message_count = 0
-            self._end_event_fired = False  # PATCH: reset guard
+            self._end_event_fired = False
 
         self._last_user_activity = now
         self._session_message_count += 1
@@ -136,7 +113,6 @@ class TimeStream(BaseStream):
         if self._session_active and self._last_user_activity:
             silence = (now - self._last_user_activity).total_seconds() / 60
             if silence > self._session_timeout and not self._end_event_fired:
-                # Session ended — fire event ONCE
                 duration = 0.0
                 if self._session_start:
                     duration = (self._last_user_activity - self._session_start).total_seconds() / 60
@@ -146,7 +122,7 @@ class TimeStream(BaseStream):
                     duration_minutes=duration,
                 ))
                 self._session_active = False
-                self._end_event_fired = True  # PATCH: don't fire again
+                self._end_event_fired = True
 
                 log.info(
                     "Session ended (timeout after %.0fm silence, "
@@ -221,6 +197,7 @@ class RSSStream(BaseStream):
         # feeds: [{"url": "...", "name": "...", "tags": [...]}]
         self.feeds = feeds or []
         self._seen_ids: set[str] = set()
+        self._seen_order: deque[str] = deque()
         self._feedparser = None
 
     def _get_feedparser(self):
@@ -248,17 +225,18 @@ class RSSStream(BaseStream):
         for feed_config in self.feeds:
             try:
                 # feedparser is sync — run in executor to not block
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 parsed = await loop.run_in_executor(
                     None, fp.parse, feed_config["url"]
                 )
 
                 for entry in parsed.entries[:10]:
                     entry_id = entry.get("id") or entry.get("link") or entry.get("title", "")
-                    if entry_id in self._seen_ids:
+                    if not entry_id or entry_id in self._seen_ids:
                         continue
 
                     self._seen_ids.add(entry_id)
+                    self._seen_order.append(entry_id)
                     title = entry.get("title", "untitled")
                     summary = entry.get("summary", "")[:200]
 
@@ -271,9 +249,9 @@ class RSSStream(BaseStream):
             except Exception as e:
                 log.debug("RSS poll failed for %s: %s", feed_config.get("name"), e)
 
-        # Cap seen IDs to prevent unbounded growth
-        if len(self._seen_ids) > 5000:
-            self._seen_ids = set(list(self._seen_ids)[-2000:])
+        while len(self._seen_order) > 5000:
+            old = self._seen_order.popleft()
+            self._seen_ids.discard(old)
 
         self.mark_polled()
         return events

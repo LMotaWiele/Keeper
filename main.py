@@ -1,21 +1,4 @@
-"""
-Main entrypoint — initialises the conscious architecture and starts the Telegram bot.
-
-Fixed for Windows compatibility:
-  - Everything runs in a single event loop (background tasks survive)
-  - Uses python-telegram-bot's post_init/post_shutdown hooks instead
-    of separate asyncio.run() calls that each create/destroy their own loop
-
-Startup order:
-  1. Logging
-  2. Config (ensure dirs)
-  3. Companion startup via post_init (init memory, load state, start background loops)
-  4. Telegram bot polling (same event loop)
-
-Shutdown:
-  - Companion saves all state to disk via post_shutdown
-  - Background loops stop gracefully
-"""
+"""Entrypoint — one event loop for companion background tasks and Telegram polling."""
 from __future__ import annotations
 
 import asyncio
@@ -45,17 +28,13 @@ def setup_logging() -> None:
         stream=sys.stdout,
         level=logging.INFO,
     )
-    # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
 
 
 async def on_bot_startup(application) -> None:
-    """
-    Called by python-telegram-bot's post_init hook — runs inside
-    the bot's own event loop, so background tasks stay alive.
-    """
+    """post_init: start companion on the bot's event loop so background tasks survive."""
     log = structlog.get_logger()
     log.info("Companion starting up…")
 
@@ -73,10 +52,7 @@ async def on_bot_startup(application) -> None:
 
 
 async def on_bot_shutdown(application) -> None:
-    """
-    Called by python-telegram-bot's post_shutdown hook — same loop,
-    background tasks are still reachable for graceful cancellation.
-    """
+    """post_shutdown: persist state and stop background loops on the same loop."""
     log = structlog.get_logger()
     log.info("Shutting down…")
     await companion.shutdown()
@@ -87,17 +63,12 @@ def main() -> None:
     setup_logging()
     log = structlog.get_logger()
 
-    # Build the Telegram application with lifecycle hooks
     app = build_application()
     app.post_init = on_bot_startup
     app.post_shutdown = on_bot_shutdown
 
     log.info("Telegram bot polling… (Ctrl+C to stop)")
 
-    # run_polling() creates ONE event loop and runs everything inside it:
-    #   post_init (companion startup + background loops)
-    #   → polling (message handling)
-    #   → post_shutdown (companion save + cleanup)
     app.run_polling(
         allowed_updates=["message"],
         drop_pending_updates=True,

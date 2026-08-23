@@ -1,16 +1,7 @@
-"""
-Telegram bot — the companion's face.
-
-Updated to integrate with the ConsciousArchitecture:
-  - Signals session start/end to the environment layer
-  - Uses companion.clear_session() for /clear
-  - Adds /status command to inspect pillar states
-  - Adds /goals command to see active goals
-"""
+"""Telegram interface — allowlisted chat, commands, typing indicator."""
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from telegram import Update
@@ -30,14 +21,22 @@ from core.loop import companion
 log = logging.getLogger(__name__)
 
 
-# ── Guards ────────────────────────────────────────────────────────────────
+CHUNK = 4000  # Telegram hard limit is 4096.
+
 
 def allowed(update: Update) -> bool:
     uid = update.effective_user.id if update.effective_user else None
     return uid in config.allowed_user_ids
 
 
-# ── Handlers ──────────────────────────────────────────────────────────────
+async def _reply(update: Update, text: str) -> None:
+    """Send text in Telegram-safe chunks."""
+    for i in range(0, max(len(text), 1), CHUNK):
+        chunk = text[i : i + CHUNK] or text
+        await update.message.reply_text(chunk)
+        if i + CHUNK < len(text):
+            await asyncio.sleep(0.5)
+
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
@@ -63,10 +62,7 @@ async def memory_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     from memory.episodic import episodic
     block = await episodic.format_for_prompt(uid)
-    if block:
-        await update.message.reply_text(block)
-    else:
-        await update.message.reply_text("Nothing stored in episodic memory yet.")
+    await _reply(update, block or "Nothing stored in episodic memory yet.")
 
 
 async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,26 +74,26 @@ async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     drives = status["drives"]
 
     lines = [
-        "📊 **Companion Status**",
+        "Companion status",
         "",
-        f"**Engagement:** {state['engagement']}"  ,
-        f"**Mode:** {state['mode']}",
-        f"**Arousal:** {state['arousal']:.2f}  "
-        f"**Curiosity:** {state['curiosity']:.2f}  "
-        f"**Fatigue:** {state['fatigue']:.2f}",
+        f"Engagement: {state['engagement']}",
+        f"Mode: {state['mode']}",
+        f"Arousal: {state['arousal']:.2f}  "
+        f"Curiosity: {state['curiosity']:.2f}  "
+        f"Fatigue: {state['fatigue']:.2f}",
         "",
-        f"**Self-model:** v{status['self_model_version']}",
-        f"**Active goals:** {status['active_goals']}",
-        f"**Completed goals:** {status['completed_goals']}",
-        f"**Background tasks:** {status['background_tasks']}",
+        f"Self-model: v{status['self_model_version']}",
+        f"Active goals: {status['active_goals']}",
+        f"Completed goals: {status['completed_goals']}",
+        f"Background tasks: {status['background_tasks']}",
         "",
-        "**Drives:**",
+        "Drives:",
     ]
     for name, intensity in sorted(drives.items(), key=lambda x: -x[1]):
         bar = "█" * int(intensity * 10) + "░" * (10 - int(intensity * 10))
         lines.append(f"  {name}: {bar} {intensity:.2f}")
 
-    await update.message.reply_text("\n".join(lines))
+    await _reply(update, "\n".join(lines))
 
 
 async def goals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -112,17 +108,17 @@ async def goals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    lines = ["🎯 **Active Goals**", ""]
+    lines = ["Active goals", ""]
     for g in sorted(active, key=lambda g: g.salience, reverse=True):
         progress = f"{g.progress:.0%}"
-        parent = f" → {g.parent_goal}" if g.parent_goal else ""
-        lines.append(f"**{g.name}**{parent} [{progress}]")
+        parent = f" -> {g.parent_goal}" if g.parent_goal else ""
+        lines.append(f"{g.name}{parent} [{progress}]")
         lines.append(f"  {g.description}")
         if g.progress_notes:
-            lines.append(f"  _Last: {g.progress_notes[-1]}_")
+            lines.append(f"  Last: {g.progress_notes[-1]}")
         lines.append("")
 
-    await update.message.reply_text("\n".join(lines))
+    await _reply(update, "\n".join(lines))
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -132,7 +128,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     uid = update.effective_user.id
     user_text = update.message.text.strip()
 
-    # Show typing indicator
     await ctx.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action=ChatAction.TYPING,
@@ -144,18 +139,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         log.exception("Agent error for user %s", uid)
         reply = f"Something went wrong on my end. ({type(exc).__name__})"
 
-    # Split long replies (Telegram max ~4096 chars)
-    chunk_size = 4000
-    for i in range(0, len(reply), chunk_size):
-        chunk = reply[i : i + chunk_size]
-        await update.message.reply_text(chunk)
-
-        if i + chunk_size < len(reply):
-            await asyncio.sleep(0.5)
-            await ctx.bot.send_chat_action(
-                chat_id=update.effective_chat.id,
-                action=ChatAction.TYPING,
-            )
+    await _reply(update, reply)
 
 
 # ── Bot setup ─────────────────────────────────────────────────────────────

@@ -1,28 +1,4 @@
-"""
-Internal state — the system's continuously maintained inner conditions.
-
-This is Pillar 2 of The_core architecture, and arguably the most important
-thing that standard agent frameworks completely ignore.
-
-Four primary dimensions:
-  - Arousal:   general activation level (sharpens focus vs diffuse processing)
-  - Valence:   positive/negative affect (colors interpretation of ambiguous input)
-  - Curiosity: interest in current topic (drives engagement depth)
-  - Fatigue:   processing degradation over extended use (recovers during rest)
-
-Plus a DriveSystem for motivational states.
-
-The crucial property: this state *actually influences* every LLM call.
-It's not decorative metadata — it gets injected into the system prompt
-and shapes how the model processes input. And it updates based on what
-happens, creating a genuine feedback loop.
-
-State persists to disk between sessions so the system "wakes up"
-in roughly the condition it was in when it last ran.
-
-MODIFIED (Keeper Modifications Spec):
-  - Added apply_budget_fatigue() for API budget → fatigue integration
-"""
+"""Internal state — affect + drives injected into every LLM call. See docs/design.md."""
 from __future__ import annotations
 
 import json
@@ -117,11 +93,7 @@ class InternalState:
         return delta
 
     def _compute_delta(self, event: Event) -> dict[str, float]:
-        """
-        Map an event to state dimension changes.
-        This is where the personality lives — how the system reacts
-        to different kinds of stimuli.
-        """
+        """Map an event to affect/drive deltas — this is the reaction table."""
         d: dict[str, float] = {}
 
         if isinstance(event, UserMessageEvent):
@@ -220,11 +192,7 @@ class InternalState:
     # ── Budget-driven fatigue ─────────────────────────────────────────────
 
     def apply_budget_fatigue(self, api_budget: Any) -> None:
-        """
-        Blend budget-based fatigue with organic fatigue.
-        Budget fatigue sets a FLOOR — you can't feel energetic
-        when you're almost out of money.
-        """
+        """Budget fatigue is a floor: you cannot feel energetic when nearly out of money."""
         budget_fatigue = api_budget.compute_fatigue_contribution()
         self.fatigue = max(self.fatigue, budget_fatigue)
 

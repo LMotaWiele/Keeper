@@ -1,21 +1,4 @@
-"""
-Semantic memory — abstracted knowledge derived from experience.
-
-Replaces the old long_term.py. Still backed by ChromaDB for vector search,
-but now serves a distinct role: this is where *patterns* live, not raw
-experiences. The consolidator extracts meaning from episodic memory and
-crystallises it here.
-
-Think of episodic memory as "I remember that conversation about cooking"
-and semantic memory as "this person is a confident cook who prefers
-Mediterranean flavours."
-
-Key differences from the old long_term:
-  - Stores crystallised patterns, not raw conversation dumps
-  - Metadata tracks source episodes and confidence scores
-  - Supports incremental reinforcement (same pattern seen again → stronger)
-  - Patterns can be invalidated when contradicted by new episodes
-"""
+"""Semantic memory — Chroma patterns, not transcripts. Same text reinforces instead of duplicating."""
 from __future__ import annotations
 
 import hashlib

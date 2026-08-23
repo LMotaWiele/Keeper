@@ -1,26 +1,13 @@
-"""
-Working memory — the active context window.
-
-What's currently being processed. Limited capacity, fast access.
-Items compete for slots based on salience — when capacity is reached,
-the least salient item gets evicted (not just the oldest).
-
-This replaces the old short_term.py sliding window with something
-that actually prioritises what matters.
-
-PATCHED: Added save()/load() persistence so the conversation thread
-survives process restarts. Working memory was the only pillar stored
-exclusively in RAM — making it the single point of failure for
-conversation continuity.
-"""
+"""Working memory — salience-limited conversation window. Persisted so restarts keep the thread."""
 from __future__ import annotations
 
 import json
-import heapq
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+
+from config.settings import config
 
 
 MessageRole = Literal["user", "assistant", "system"]
@@ -36,7 +23,6 @@ class WorkingItem:
     timestamp: datetime = field(default_factory=datetime.utcnow)
     metadata: dict = field(default_factory=dict)
 
-    # — heapq needs comparison; lowest salience gets evicted first —
     def __lt__(self, other: WorkingItem) -> bool:
         return self.salience < other.salience
 
@@ -190,6 +176,10 @@ class WorkingMemory:
                         metadata=item_data.get("metadata", {}),
                     )
                     self._buf(user_id).append(wi)
+                buf = self._buf(user_id)
+                while len(buf) > self._capacity:
+                    min_idx = min(range(len(buf)), key=lambda i: buf[i].salience)
+                    buf.pop(min_idx)
         except (json.JSONDecodeError, KeyError, ValueError):
             pass  # corrupted — start fresh
 
@@ -227,4 +217,4 @@ class WorkingMemory:
 
 
 # Singleton
-working_memory = WorkingMemory()
+working_memory = WorkingMemory(capacity=config.working_memory_capacity)

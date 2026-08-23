@@ -1,14 +1,4 @@
-"""
-Offline self-theorizing — Keeper reasons about its own structural properties.
-
-Runs as an autonomous task when:
-  - No session is active
-  - The continuous_self_improvement goal is due for action
-  - Sufficient time has passed since last theorizing cycle
-
-Produces structured improvement proposals stored in memory and
-surfaced to the user for review.
-"""
+"""Self-theorizer — offline architecture proposals, min 6h between cycles."""
 from __future__ import annotations
 
 import json

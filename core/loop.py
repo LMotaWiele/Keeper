@@ -1,26 +1,4 @@
-"""
-Conscious architecture — the central orchestrator.
-
-MODIFIED (Keeper Modifications Spec):
-  - Added CodebaseIndex for structural self-knowledge (mod 1)
-  - Added permanent goals initialization (mod 2)
-  - Added UserLifeTracker (mod 2)
-  - Added SelfTheorizer for offline improvement proposals (mod 3)
-  - Added SearchBudget and APIBudget (mods 4+5)
-  - Added FutureSimulator for action outcome prediction (mod 6)
-  - Budget-driven fatigue in post_process (mod 5)
-  - All new state persisted/restored
-
-    Background processes (started on startup):
-      - Environmental grounding loop
-      - Memory consolidation loop (now conditional — mod 9)
-      - Self-model update loop (now multi-layer — mod 8)
-      - Autonomous goal pursuit loop
-
-    Foreground process (called per user message):
-      - process() builds context from all pillars, returns it for the
-        LangGraph agent, then updates all pillars with what happened.
-"""
+"""Conscious architecture — wires pillars, background loops, and per-turn context. See docs/architecture.md."""
 from __future__ import annotations
 
 import asyncio
@@ -55,20 +33,21 @@ def _state_dir() -> Path:
 
 
 class NoveltyEstimator:
-    """Track what's been seen to estimate novelty of new inputs."""
+    """Per-user word-overlap novelty. Shared state would leak /clear across users."""
 
     def __init__(self, window: int = 50):
-        self._seen: list[str] = []
+        self._seen: dict[int, list[str]] = {}
         self._window = window
 
-    def estimate(self, text: str) -> float:
+    def estimate(self, text: str, user_id: int = 0) -> float:
+        buf = self._seen.setdefault(user_id, [])
         words = set(text.lower().split())
-        if not self._seen:
-            self._seen.append(text)
+        if not buf:
+            buf.append(text)
             return 0.8
 
-        seen_words = set()
-        for s in self._seen[-self._window:]:
+        seen_words: set[str] = set()
+        for s in buf[-self._window:]:
             seen_words.update(s.lower().split())
 
         if not words:
@@ -77,30 +56,21 @@ class NoveltyEstimator:
         overlap = len(words & seen_words) / len(words)
         novelty = 1.0 - overlap
 
-        self._seen.append(text)
-        if len(self._seen) > self._window * 2:
-            self._seen = self._seen[-self._window:]
+        buf.append(text)
+        if len(buf) > self._window * 2:
+            self._seen[user_id] = buf[-self._window:]
 
         return max(0.1, min(1.0, novelty))
 
-    def clear(self) -> None:
-        self._seen.clear()
+    def clear(self, user_id: int | None = None) -> None:
+        if user_id is None:
+            self._seen.clear()
+        else:
+            self._seen.pop(user_id, None)
 
 
 class ConsciousArchitecture:
-    """
-    The central loop wiring all five pillars together.
-
-    Background processes (started on startup):
-      - Environmental grounding loop (polls streams, updates state)
-      - Memory consolidation loop (episodic → semantic, decay, forgetting)
-      - Self-model update loop (analyzes behavioral history)
-      - Autonomous goal pursuit loop (acts between user inputs)
-
-    Foreground process (called per user message):
-      - process() builds context from all pillars, returns it for the
-        LangGraph agent, then updates all pillars with what happened.
-    """
+    """Orchestrator singleton: pillars + background loops + per-turn prompt."""
 
     def __init__(self):
         # Pillar 1 — Memory
@@ -124,7 +94,6 @@ class ConsciousArchitecture:
             self_model=None,  # set after self_model is created
         )
 
-        # ── NEW: Codebase index for structural self-knowledge ─────────────
         self.codebase = CodebaseIndex(Path("."))
         try:
             self.codebase.rebuild()
@@ -136,7 +105,7 @@ class ConsciousArchitecture:
             memory_system=self.memory,
             codebase=self.codebase,
         )
-        self.autonomous.self_model = self.self_model  # wire the circular dep
+        self.autonomous.self_model = self.self_model
 
         # Research engine — connects autonomous goals to opinion formation
         self.research = ResearchEngine(
@@ -145,14 +114,11 @@ class ConsciousArchitecture:
         )
         self.autonomous.research = self.research
 
-        # ── NEW: Resource budgets ─────────────────────────────────────────
         self.search_budget = SearchBudget()
         self.api_budget = APIBudget()
 
-        # ── NEW: User life tracker ────────────────────────────────────────
         self.user_life = UserLifeTracker()
 
-        # ── NEW: Self-theorizer (offline improvement proposals) ───────────
         self.theorizer = SelfTheorizer(
             codebase=self.codebase,
             self_model=self.self_model,
@@ -160,17 +126,20 @@ class ConsciousArchitecture:
         )
         self.autonomous.theorizer = self.theorizer
 
-        # ── NEW: Future simulator ─────────────────────────────────────────
         self.simulator = FutureSimulator()
         self.autonomous.simulator = self.simulator
 
-        # Utilities
         self._novelty = NoveltyEstimator()
         self._background_tasks: list[asyncio.Task] = []
         self._started = False
         self._session_active: dict[int, bool] = {}
+        self.environment.on_session_end_cb = self._on_env_session_end
 
     # ── Session query (for background processes) ──────────────────────────
+
+    def _on_env_session_end(self, user_id: int, message_count: int = 0) -> None:
+        """TimeStream timeout ended a session — unblock background loops."""
+        self._session_active[user_id] = False
 
     def is_session_active(self, user_id: int) -> bool:
         return self._session_active.get(user_id, False)
@@ -202,7 +171,6 @@ class ConsciousArchitecture:
         self.goals.load(state_dir / "goals.json")
         self.environment.load(state_dir / "environment.json")
 
-        # NEW: Load resource budgets
         budgets_path = state_dir / "resource_budgets.json"
         if budgets_path.exists():
             try:
@@ -217,7 +185,6 @@ class ConsciousArchitecture:
             except Exception as e:
                 log.warning("Failed to load budgets: %s", e)
 
-        # NEW: Load user life tracker
         life_path = state_dir / "user_life.json"
         if life_path.exists():
             try:
@@ -230,7 +197,6 @@ class ConsciousArchitecture:
             except Exception as e:
                 log.warning("Failed to load user life data: %s", e)
 
-        # NEW: Load theorizer state
         theorizer_path = state_dir / "theorizer.json"
         if theorizer_path.exists():
             try:
@@ -263,7 +229,6 @@ class ConsciousArchitecture:
             len(self.goals.active_instrumental),
         )
 
-        # NEW: Initialize permanent goals
         await self.goals.init_permanent_goals()
 
         # 4. Start background loops
@@ -294,21 +259,21 @@ class ConsciousArchitecture:
         log.info("ConsciousArchitecture stopped. State saved.")
 
     def _start_background_loops(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         user_ids = list(config.allowed_user_ids)
         primary_user = user_ids[0] if user_ids else 0
 
         self._background_tasks.append(
             loop.create_task(self.environment.run_loop(
                 user_id=primary_user,
-                base_interval_seconds=30,
+                base_interval_seconds=config.grounding_interval,
             ))
         )
 
         self._background_tasks.append(
             loop.create_task(self.memory.consolidator.run_loop(
                 user_ids=user_ids,
-                interval_minutes=30,
+                interval_minutes=config.consolidation_interval,
                 session_check=self.any_session_active,
             ))
         )
@@ -316,14 +281,14 @@ class ConsciousArchitecture:
         self._background_tasks.append(
             loop.create_task(self.self_model.run_loop(
                 user_ids=user_ids,
-                interval_minutes=60,
+                interval_minutes=config.self_model_interval,
             ))
         )
 
         self._background_tasks.append(
             loop.create_task(self.autonomous.run_loop(
                 user_id=primary_user,
-                interval_minutes=5,
+                interval_minutes=config.autonomous_interval,
                 min_idle_minutes=2,
                 session_check=self.any_session_active,
             ))
@@ -341,7 +306,6 @@ class ConsciousArchitecture:
             self.self_model.opinions.save(state_dir / "opinions.json")
             self.memory.working.save(state_dir / "working_memory.json")
 
-            # NEW: Save resource budgets
             budgets_path = state_dir / "resource_budgets.json"
             budgets_path.parent.mkdir(parents=True, exist_ok=True)
             budgets_path.write_text(json.dumps({
@@ -349,13 +313,11 @@ class ConsciousArchitecture:
                 "api": self.api_budget.snapshot(),
             }, indent=2))
 
-            # NEW: Save user life tracker
             life_path = state_dir / "user_life.json"
             life_path.write_text(json.dumps(
                 self.user_life.snapshot(), indent=2, default=str
             ))
 
-            # NEW: Save theorizer state
             theorizer_path = state_dir / "theorizer.json"
             theorizer_path.write_text(json.dumps(
                 self.theorizer.snapshot(), indent=2, default=str
@@ -378,7 +340,7 @@ class ConsciousArchitecture:
 
         self.environment.on_user_message(user_id)
 
-        novelty = self._novelty.estimate(user_text)
+        novelty = self._novelty.estimate(user_text, user_id)
         complexity = self._estimate_complexity(user_text)
 
         self.state.update(UserMessageEvent(
@@ -423,7 +385,6 @@ class ConsciousArchitecture:
             processing_time_ms=processing_time_ms,
         ))
 
-        # NEW: Record API usage and apply budget fatigue
         if input_tokens > 0 or output_tokens > 0:
             self.api_budget.record_usage(input_tokens, output_tokens)
             self.state.apply_budget_fatigue(self.api_budget)
@@ -504,13 +465,11 @@ class ConsciousArchitecture:
         if env_ctx:
             system_blocks.append(env_ctx)
 
-        # NEW: Resource budget awareness
         budget_lines = []
         budget_lines.append(self.search_budget.to_prompt_context(self.state.curiosity))
         budget_lines.append(self.api_budget.to_prompt_context())
         system_blocks.append("## Resource awareness\n" + "\n".join(budget_lines))
 
-        # NEW: Architecture awareness (only when relevant)
         _lower = user_text.lower()
         ARCHITECTURE_KEYWORDS = {
             "how do you work", "your code", "your architecture",
@@ -520,7 +479,6 @@ class ConsciousArchitecture:
         if any(kw in _lower for kw in ARCHITECTURE_KEYWORDS):
             system_blocks.append(self.codebase.summary)
 
-        # NEW: User life context (if there are open commitments)
         life_ctx = self.user_life.to_prompt_context()
         if life_ctx:
             system_blocks.append(life_ctx)
@@ -575,7 +533,7 @@ class ConsciousArchitecture:
 
     def clear_session(self, user_id: int) -> None:
         self.memory.clear_working(user_id)
-        self._novelty.clear()
+        self._novelty.clear(user_id)
         self._session_active[user_id] = False
 
     # ── Status ────────────────────────────────────────────────────────────
@@ -603,7 +561,6 @@ class ConsciousArchitecture:
             "active_sessions": {
                 uid: active for uid, active in self._session_active.items()
             },
-            # NEW
             "api_budget_remaining_eur": round(self.api_budget.remaining_eur, 2),
             "search_budget_remaining": self.search_budget.remaining,
             "pending_proposals": len(self.theorizer.pending_proposals),

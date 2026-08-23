@@ -1,27 +1,4 @@
-"""
-LangGraph agent — the companion's brain.
-
-Updated to integrate with the ConsciousArchitecture. The graph no longer
-builds its own context — it receives a rich context dict from
-companion.process() that includes all five pillars.
-
-Graph topology:
-  ┌─────────────┐
-  │  load_context│  ← Receives pre-built context from the companion loop
-  └──────┬──────┘
-         │
-  ┌──────▼──────┐
-  │    reason   │  ← LLM decides: respond directly OR call a tool
-  └──────┬──────┘
-         │
-    ┌────▼────┐
-    │ tool?   │─── yes ──► tool_executor ──► reason (loop)
-    └────┬────┘
-         │ no
-  ┌──────▼──────┐
-  │   finalize  │  ← Signals the runner to call post_process
-  └─────────────┘
-"""
+"""LangGraph agent — reason ⇄ tools. Context is built by the companion loop."""
 from __future__ import annotations
 
 from typing import Annotated, Any
@@ -30,7 +7,6 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
-    HumanMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -42,18 +18,14 @@ from config.settings import config
 from tools import ALL_TOOLS
 
 
-# ── State ─────────────────────────────────────────────────────────────────
-
 class CompanionState(TypedDict):
     user_id: int
     messages: Annotated[list[BaseMessage], add_messages]
     system_prompt: str
     tool_calls_pending: bool
-    response_text: str               # final response for post_process
-    tool_calls_made: int              # count for post_process
+    response_text: str
+    tool_calls_made: int
 
-
-# ── LLM ───────────────────────────────────────────────────────────────────
 
 llm = ChatAnthropic(
     model=config.llm_model,
@@ -65,21 +37,39 @@ llm = ChatAnthropic(
 llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
 
-# ── Nodes ─────────────────────────────────────────────────────────────────
+def message_text(content: Any) -> str:
+    """Flatten Anthropic string or content-block lists to plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text") or "")
+            elif hasattr(block, "text"):
+                parts.append(getattr(block, "text") or "")
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _tool_accepts_user_id(tool: Any) -> bool:
+    schema = getattr(tool, "args_schema", None)
+    if schema is None:
+        return False
+    fields = getattr(schema, "model_fields", None) or getattr(schema, "__fields__", None) or {}
+    return "user_id" in fields
+
 
 async def load_context(state: CompanionState) -> dict[str, Any]:
-    """
-    Context is already built by the companion loop and passed in
-    via the initial state. This node just confirms it's present.
-    """
-    # system_prompt and messages are set by the runner before invocation
+    """Passthrough — runner already filled system_prompt and messages."""
     return {}
 
 
 async def reason(state: CompanionState) -> dict[str, Any]:
-    """Core LLM reasoning step."""
+    """One LLM step: reply and/or request tools."""
     messages = [SystemMessage(content=state["system_prompt"])] + state["messages"]
-
     response = await llm_with_tools.ainvoke(messages)
 
     has_tool_calls = bool(getattr(response, "tool_calls", None))
@@ -87,19 +77,16 @@ async def reason(state: CompanionState) -> dict[str, Any]:
     if has_tool_calls:
         tool_count += len(response.tool_calls)
 
-    # Track the latest text response
-    response_text = response.content if isinstance(response.content, str) else ""
-
     return {
         "messages": [response],
         "tool_calls_pending": has_tool_calls,
-        "response_text": response_text,
+        "response_text": message_text(response.content),
         "tool_calls_made": tool_count,
     }
 
 
 async def tool_executor(state: CompanionState) -> dict[str, Any]:
-    """Execute any tool calls the LLM requested."""
+    """Run requested tools. Inject user_id when the schema expects it."""
     from langchain_core.tools import BaseTool
 
     last_ai: AIMessage = next(
@@ -115,8 +102,8 @@ async def tool_executor(state: CompanionState) -> dict[str, Any]:
             result = f"Unknown tool: {tc['name']}"
         else:
             try:
-                args = tc["args"].copy()
-                if "user_id" in tool.args_schema.model_fields:
+                args = dict(tc.get("args") or {})
+                if _tool_accepts_user_id(tool):
                     args.setdefault("user_id", state["user_id"])
                 result = await tool.ainvoke(args)
             except Exception as exc:
@@ -130,33 +117,25 @@ async def tool_executor(state: CompanionState) -> dict[str, Any]:
 
 
 async def finalize(state: CompanionState) -> dict[str, Any]:
-    """
-    Final node — nothing to do here. The runner reads response_text
-    from the state and calls companion.post_process() after the graph
-    completes.
-
-    This replaces the old consolidate node. Consolidation now happens
-    in the companion's background loops instead of blocking every response.
-    """
+    """Terminal node — runner reads response_text after the graph ends."""
     return {}
 
 
-# ── Routing ───────────────────────────────────────────────────────────────
+MAX_TOOL_CALLS = 8
+
 
 def route_after_reason(state: CompanionState) -> str:
-    return "tool_executor" if state["tool_calls_pending"] else "finalize"
+    if state["tool_calls_pending"] and state.get("tool_calls_made", 0) < MAX_TOOL_CALLS:
+        return "tool_executor"
+    return "finalize"
 
-
-# ── Graph ─────────────────────────────────────────────────────────────────
 
 def build_graph() -> Any:
     g = StateGraph(CompanionState)
-
     g.add_node("load_context", load_context)
     g.add_node("reason", reason)
     g.add_node("tool_executor", tool_executor)
     g.add_node("finalize", finalize)
-
     g.set_entry_point("load_context")
     g.add_edge("load_context", "reason")
     g.add_conditional_edges("reason", route_after_reason, {
@@ -165,7 +144,6 @@ def build_graph() -> Any:
     })
     g.add_edge("tool_executor", "reason")
     g.add_edge("finalize", END)
-
     return g.compile()
 
 

@@ -1,197 +1,104 @@
-# Virtual Companion Agent
+# Keeper
 
-A soul-driven LangGraph agent with tiered memory, web search, and a Telegram interface. Runs on your PC, talks to you through your phone.
+A personal AI companion with an inner life — memory that forgets, opinions it can defend, and goals it pursues while you are away.
 
----
+Keeper is not a chatbot wrapper. Each turn rebuilds a system prompt from five pillars (memory, affect, environment, goals, self-model), then a small LangGraph loop reasons and uses tools. Between conversations, background processes consolidate memories, update a behavioral self-model, and research topics so the next session is not a blank slate.
+
+Talk to it from your phone. It runs on your machine.
+
+## Why this exists
+
+Most agents are a prompt plus tools. They have no state between turns except a transcript. Keeper treats that as the interesting problem:
+
+- **Affect is real in the prompt.** Arousal, curiosity, fatigue, and drives are not labels — they change how the model is instructed to respond, and they update from what just happened.
+- **Forgetting is a feature.** Episodes decay. Recalling them reinforces them. What survives is part of identity.
+- **Opinions have origins.** Independent, adopted, or researched. An independence score flags sycophantic drift.
+- **Autonomy stays internal.** It does not ping you. Research notes and self-theorizing show up later as better context.
+
+Identity lives in [`SOUL.md`](SOUL.md) and is re-read every turn.
 
 ## Architecture
 
 ```
-Telegram (phone)
-      │
-      ▼
- telegram/bot.py          ← message handler, allowlist, typing indicator
-      │
-      ▼
- agent/runner.py          ← wraps graph invocation, manages short-term window
-      │
-      ▼
- agent/graph.py           ← LangGraph state machine
-      │
-  ┌───┴────────────────────────┐
-  │                            │
-load_context               tools/
-  │  • reads SOUL.md        web_search.py     (Tavily)
-  │  • loads mid-term ctx   memory_tools.py   (save/recall facts)
-  │  • semantic LTM search      │
-  ▼                            │
-reason (LLM) ◄────────────────┘
-  │  • decides: reply or call tool
-  │  • loops until done
-  ▼
-consolidate
-  • extracts new facts/preferences
-  • saves session summary to long-term memory
+Telegram (allowlisted)
+        │
+        ▼
+   tg/bot.py
+        │
+        ▼
+   agent/runner.py
+        │
+        ├─ process()       assemble prompt from all pillars
+        ├─ LangGraph       reason ⇄ tools → reply
+        └─ post_process()  update state, memory, opinions, goals
 ```
 
-### Memory layers
+| Pillar | What it does |
+|--------|----------------|
+| **Memory** | Working window (salience eviction), episodic SQLite with decay, semantic Chroma patterns |
+| **Internal state** | Affect vector + drives, event-driven, persisted across restarts |
+| **Environment** | Time passing, session rhythm, optional RSS, system health |
+| **Goals** | Terminal orientations + instrumental goals + idle autonomous pursuit |
+| **Self-model** | Identity learned from observed behavior; opinion registry against mirroring |
 
-| Layer | Storage | Lifetime | What goes there |
-|-------|---------|----------|-----------------|
-| **Short-term** | RAM (deque) | Session | Last 20 messages — conversation context |
-| **Mid-term** | SQLite | Weeks–months | Facts, preferences, notable events |
-| **Long-term** | ChromaDB (vectors) | Indefinite | Session summaries, important discussions, semantic search |
+Design reasoning, memory details, and goal/self-model notes: [`docs/`](docs/).
 
----
+## Stack
 
-## Setup
+Python 3.11+ · LangGraph · Claude · ChromaDB · SQLite · Tavily · python-telegram-bot
 
-### 1. Prerequisites
+## Quick start
 
-- Python 3.11+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Your Telegram user ID (send a message to [@userinfobot](https://t.me/userinfobot))
-- Anthropic API key
-- Tavily API key (free tier at [tavily.com](https://tavily.com))
-- OpenAI API key (used only for cheap text embeddings)
-
-### 2. Clone & install
+**You need:** a [Telegram bot token](https://t.me/BotFather), your Telegram user id, an Anthropic API key, a Tavily key, and an OpenAI key (embeddings only).
 
 ```bash
-# Create and activate a virtual environment
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
-
-# Install dependencies
 pip install -r requirements.txt
-```
-
-### 3. Configure
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in:
-
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=123456:ABC-...
-TELEGRAM_ALLOWED_USER_IDS=123456789   # your Telegram user ID
-TAVILY_API_KEY=tvly-...
-OPENAI_API_KEY=sk-...                 # for embeddings only
-```
-
-Everything else has sensible defaults.
-
-### 4. Run
-
-```bash
+cp .env.example .env              # then fill in keys
 python main.py
 ```
 
-On first run, it will create `./data/` with the SQLite and ChromaDB stores.
+First run creates `./data/` (SQLite, Chroma, JSON state).
 
----
+### Telegram
 
-## Telegram Commands
-
-| Command | Description |
-|---------|-------------|
+| Command | What it does |
+|---------|----------------|
 | `/start` | Wake the companion |
-| `/memory` | Show what's stored in mid-term memory |
-| `/clear` | Clear the current session's short-term memory |
+| `/memory` | Show episodic memory |
+| `/status` | Affect, drives, goals, self-model version |
+| `/goals` | Active instrumental goals |
+| `/clear` | Wipe the working-memory window |
 
-Everything else is just a message — talk naturally.
+Everyone else is silently ignored (`TELEGRAM_ALLOWED_USER_IDS`).
 
----
+### Always-on (Linux)
 
-## Running as a background service (Linux)
-
-So the companion is always on when your PC is running:
+Edit paths in `companion.service`, then:
 
 ```bash
-# Edit the paths in companion.service first
 sudo cp companion.service /etc/systemd/system/companion@$USER.service
-sudo systemctl daemon-reload
-sudo systemctl enable companion@$USER
-sudo systemctl start companion@$USER
-
-# View logs
+sudo systemctl enable --now companion@$USER
 journalctl -u companion@$USER -f
 ```
 
----
-
-## Project structure
+## Layout
 
 ```
-companion/
-├── SOUL.md                  ← The companion's identity (edit freely)
-├── main.py                  ← Entry point
-├── requirements.txt
-├── .env.example
-├── companion.service        ← systemd unit file
-│
-├── config/
-│   └── settings.py          ← Env-driven config
-│
-├── agent/
-│   ├── graph.py             ← LangGraph state machine
-│   └── runner.py            ← Graph invocation wrapper
-│
-├── memory/
-│   ├── short_term.py        ← In-process message window
-│   ├── mid_term.py          ← SQLite episodic store
-│   └── long_term.py         ← ChromaDB vector store
-│
-├── tools/
-│   ├── web_search.py        ← Tavily web search
-│   └── memory_tools.py      ← Memory read/write tools for the agent
-│
-├── telegram/
-│   └── bot.py               ← python-telegram-bot handler
-│
-└── data/                    ← Auto-created on first run
-    ├── midterm.db
-    └── chroma/
+Keeper/
+├── SOUL.md                 identity prompt (edit freely)
+├── main.py                 process entry
+├── agent/                  LangGraph + runner
+├── core/                   orchestrator, state, self-model, opinions
+├── memory/                 working / episodic / semantic / consolidator
+├── environment/            time, streams, future simulation
+├── goals/                  goals, autonomy, research, self-theorizing
+├── tg/                     Telegram bot
+├── tools/                  web search + memory tools
+└── docs/                   architecture and design notes
 ```
 
----
+## License
 
-## Extending the companion
-
-### Add a new tool
-
-1. Create a `@tool` function in `tools/` (or add it to `memory_tools.py`)
-2. Import it in `tools/__init__.py` and add it to `ALL_TOOLS`
-
-The agent will automatically have access to it on the next run.
-
-### Add a new Telegram command
-
-In `telegram/bot.py`, add a handler function and register it:
-
-```python
-async def my_cmd(update, ctx):
-    ...
-
-app.add_handler(CommandHandler("mycommand", my_cmd))
-```
-
-### Change the LLM
-
-Edit `LLM_MODEL` in `.env`. Any model supported by `langchain-anthropic` works.
-
-### Edit the soul
-
-Just edit `SOUL.md`. It's re-read at the start of every conversation turn — changes take effect immediately without restart. Per SOUL.md itself: if the agent edits this file, it will tell you.
-
----
-
-## Tips
-
-- **Privacy**: `TELEGRAM_ALLOWED_USER_IDS` is your hard allowlist. The bot will silently ignore everyone else.
-- **Cost**: Most turns use ~1k–3k tokens. Embeddings (OpenAI) are very cheap — a year of daily use costs a few dollars.
-- **Offline tolerance**: The bot uses long-polling, so it handles your PC sleeping/waking gracefully. Set `drop_pending_updates=True` (already set) if you don't want it processing a backlog on wake.
-- **Memory growth**: ChromaDB is append-only by default. Old summaries stay forever, which is the point. If you ever want to prune, use `long_term.delete(user_id, doc_id)`.
+Apache License 2.0. See [`LICENSE`](LICENSE).

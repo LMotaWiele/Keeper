@@ -1,14 +1,4 @@
-"""
-Track the user's real-life progress, not their engagement with Keeper.
-
-The fundamental principle: Keeper's success is measured by the user's
-life getting better, NOT by the user talking to Keeper more.
-
-Tracks:
-  - Goals/commitments the user mentions → did they follow through?
-  - Self-reported wellbeing (mood, energy, stress mentioned in conversation)
-  - Concrete life achievements (got the job, finished the project, etc.)
-"""
+"""User-life tracker — commitments, wellbeing, achievements. Success is their life, not chat volume."""
 from __future__ import annotations
 
 import logging

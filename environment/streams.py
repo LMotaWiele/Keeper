@@ -8,6 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from datetime import datetime, timedelta
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
 
@@ -47,11 +48,11 @@ class BaseStream(ABC):
     def is_due(self) -> bool:
         if self._last_poll is None:
             return True
-        elapsed = (datetime.utcnow() - self._last_poll).total_seconds()
+        elapsed = (utcnow() - self._last_poll).total_seconds()
         return elapsed >= self.poll_interval
 
     def mark_polled(self) -> None:
-        self._last_poll = datetime.utcnow()
+        self._last_poll = utcnow()
 
 
 # ── Time stream ───────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ class TimeStream(BaseStream):
 
     def record_user_activity(self) -> None:
         """Called by the bot when the user sends a message."""
-        now = datetime.utcnow()
+        now = utcnow()
 
         if not self._session_active:
             # Session is starting
@@ -100,7 +101,7 @@ class TimeStream(BaseStream):
 
     async def poll(self) -> list[Event]:
         events: list[Event] = []
-        now = datetime.utcnow()
+        now = utcnow()
 
         # Time passing is always an event
         minutes_since_poll = 1.0
@@ -137,7 +138,7 @@ class TimeStream(BaseStream):
         """Generate a session start event (called when user first messages)."""
         gap_hours = None
         if self._last_user_activity:
-            gap_hours = (datetime.utcnow() - self._last_user_activity).total_seconds() / 3600
+            gap_hours = (utcnow() - self._last_user_activity).total_seconds() / 3600
 
         return SessionStartEvent(
             hours_since_last=gap_hours or 0.0,
@@ -146,7 +147,7 @@ class TimeStream(BaseStream):
 
     def _time_of_day(self) -> str:
         """Human-readable time of day."""
-        hour = datetime.utcnow().hour  # TODO: adjust for user timezone
+        hour = utcnow().hour  # TODO: adjust for user timezone
         if hour < 6:
             return "late_night"
         elif hour < 12:
@@ -161,7 +162,7 @@ class TimeStream(BaseStream):
     def to_context(self) -> str:
         """Time awareness context for the prompt."""
         parts = []
-        now = datetime.utcnow()
+        now = utcnow()
         parts.append(f"Current time: {now.strftime('%A %H:%M UTC')}")
 
         if self._session_active and self._session_start:
@@ -322,7 +323,7 @@ class SystemHealthStream(BaseStream):
 
     def __init__(self, poll_interval_seconds: float = 300):  # 5 min
         super().__init__("system_health", poll_interval_seconds)
-        self._start_time = datetime.utcnow()
+        self._start_time = utcnow()
         self._last_disk_warning: datetime | None = None
 
     async def poll(self) -> list[Event]:
@@ -342,10 +343,10 @@ class SystemHealthStream(BaseStream):
                     content=f"Disk usage high: {pct_used:.0f}% ({free // (1024**3)}GB free)",
                     salience=0.6,
                 ))
-                self._last_disk_warning = datetime.utcnow()
+                self._last_disk_warning = utcnow()
 
             # Uptime awareness
-            uptime_hours = (datetime.utcnow() - self._start_time).total_seconds() / 3600
+            uptime_hours = (utcnow() - self._start_time).total_seconds() / 3600
             if uptime_hours > 0 and uptime_hours % 24 < (self.poll_interval / 3600):
                 # Just crossed a 24-hour boundary
                 events.append(StreamUpdateEvent(
@@ -363,12 +364,12 @@ class SystemHealthStream(BaseStream):
     def _should_warn_disk(self) -> bool:
         if self._last_disk_warning is None:
             return True
-        elapsed = (datetime.utcnow() - self._last_disk_warning).total_seconds() / 3600
+        elapsed = (utcnow() - self._last_disk_warning).total_seconds() / 3600
         return elapsed > 6  # warn at most every 6 hours
 
     @property
     def uptime_hours(self) -> float:
-        return (datetime.utcnow() - self._start_time).total_seconds() / 3600
+        return (utcnow() - self._start_time).total_seconds() / 3600
 
     def to_context(self) -> str:
         """System awareness context for the prompt."""

@@ -1,8 +1,9 @@
 """Entrypoint — one event loop for companion background tasks and Telegram polling."""
 from __future__ import annotations
 
-import asyncio
+import argparse
 import logging
+import shutil
 import sys
 
 import structlog
@@ -47,7 +48,9 @@ async def on_bot_startup(application) -> None:
         db=str(config.midterm_db_path),
         chroma=str(config.chroma_db_path),
         users=config.allowed_user_ids,
-        model=config.llm_model,
+        model_high=config.model_high,
+        model_mid=config.model_mid,
+        model_low=config.model_low,
     )
 
 
@@ -60,8 +63,23 @@ async def on_bot_shutdown(application) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Keeper companion")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="Delete ./data/ before starting (no migration; all state is disposable)",
+    )
+    args = parser.parse_args()
+
     setup_logging()
     log = structlog.get_logger()
+
+    if args.reset:
+        data = config.data_dir
+        if data.exists():
+            shutil.rmtree(data)
+            log.info("Wiped data directory", path=str(data))
+        config.ensure_dirs()
 
     app = build_application()
     app.post_init = on_bot_startup

@@ -38,9 +38,9 @@ Three layers, on purpose:
 
 Consolidation is periodic and **skipped during an active session**. Decay and forgetting mid-conversation would yank context out from under the current turn. The graph used to consolidate on every reply; that blocked the user and mixed online work with offline work.
 
-## Session timeout is 60 minutes, not 15
+## Session timeout is 15 minutes
 
-A 15-minute silence timeout treated “getting coffee” as the end of the relationship. That fired `SessionEndEvent` repeatedly, reset conversational framing, and (when the session flag was stuck) blocked consolidation forever. The timeout is 60 minutes by default, fires once per actual end, and clears the companion’s session flag so background loops can run again.
+`SESSION_TIMEOUT_MIN` defaults to 15. A 60-minute timeout kept `_session_active` true for an hour after the last message and suppressed background work the whole time. The timeout fires once per actual end and clears the companion’s session flag so consolidation and autonomy can run again. Consolidation is gated **per user**, not globally.
 
 ## Self-model is observed, not assumed
 
@@ -63,7 +63,7 @@ Between sessions Keeper may research, write an internal note, or propose an arch
 
 ## User-life, not engagement
 
-`UserLifeTracker` measures commitments followed through, wellbeing trend, and real-world achievements. Success is “their life got better,” not “they talked to me more.” The permanent goal `user_life_improvement` is the optimizer for that metric.
+`UserLifeTracker` measures commitments followed through, wellbeing trend, and real-world achievements. Success is “their life got better,” not “they talked to me more.” The unbounded goal `user_life_improvement` is the optimizer for that metric.
 
 ## Codebase index is opt-in on the prompt
 
@@ -75,4 +75,4 @@ Simulating every reply would double cost for no gain. The simulator runs when th
 
 ## Resource budgets
 
-Curiosity scales the daily search quota (20–60). API spend maps onto fatigue. Both reset at midnight local date. The prompt includes remaining budget so the model can choose to skip a search; the tools also enforce the search cap so a runaway tool loop cannot ignore it.
+Token spend is the only resource constraint. `APIBudget` records every OpenRouter call (reported `usage.cost`, falling back to a pricing table). Daily ceiling €10, reset at local midnight. Background loops gate on remaining budget; conversation degrades tier instead of going silent. Search has no fabricated quota — SearXNG is local. Health counters (`SearchHealth`) flag empty result sets and fetch failures.

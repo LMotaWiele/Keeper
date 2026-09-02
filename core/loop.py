@@ -15,7 +15,8 @@ from core.events import (
 )
 from core.self_model import SelfModel
 from core.codebase_index import CodebaseIndex
-from core.resource_budgets import SearchBudget, APIBudget
+from core.llm import Tier
+from core.resource_budgets import APIBudget, refresh_model_pricing
 from core.user_life import UserLifeTracker
 from environment.grounding import EnvironmentalGrounding
 from environment.future_sim import FutureSimulator
@@ -114,7 +115,6 @@ class ConsciousArchitecture:
         )
         self.autonomous.research = self.research
 
-        self.search_budget = SearchBudget()
         self.api_budget = APIBudget()
 
         self.user_life = UserLifeTracker()
@@ -155,6 +155,8 @@ class ConsciousArchitecture:
 
         log.info("ConsciousArchitecture starting up…")
 
+        refresh_model_pricing()
+
         # 1. Init memory stores
         await self.memory.init()
 
@@ -175,12 +177,12 @@ class ConsciousArchitecture:
         if budgets_path.exists():
             try:
                 bdata = json.loads(budgets_path.read_text())
-                self.search_budget.restore(bdata.get("search", {}))
                 self.api_budget.restore(bdata.get("api", {}))
                 log.info(
-                    "Budgets restored — API: €%.2f spent, Search: %d used",
+                    "Budgets restored — API: €%.2f spent, %d calls, tasks=%s",
                     self.api_budget.spent_today_eur,
-                    self.search_budget.searches_today,
+                    self.api_budget.calls_today,
+                    list(self.api_budget.spend_by_task.keys()),
                 )
             except Exception as e:
                 log.warning("Failed to load budgets: %s", e)
@@ -229,7 +231,7 @@ class ConsciousArchitecture:
             len(self.goals.active_instrumental),
         )
 
-        await self.goals.init_permanent_goals()
+        await self.goals.init_unbounded_goals()
 
         # 4. Start background loops
         self._start_background_loops()
@@ -274,7 +276,7 @@ class ConsciousArchitecture:
             loop.create_task(self.memory.consolidator.run_loop(
                 user_ids=user_ids,
                 interval_minutes=config.consolidation_interval,
-                session_check=self.any_session_active,
+                session_check=self.is_session_active,
             ))
         )
 
@@ -309,7 +311,6 @@ class ConsciousArchitecture:
             budgets_path = state_dir / "resource_budgets.json"
             budgets_path.parent.mkdir(parents=True, exist_ok=True)
             budgets_path.write_text(json.dumps({
-                "search": self.search_budget.snapshot(),
                 "api": self.api_budget.snapshot(),
             }, indent=2))
 
@@ -385,9 +386,9 @@ class ConsciousArchitecture:
             processing_time_ms=processing_time_ms,
         ))
 
-        if input_tokens > 0 or output_tokens > 0:
-            self.api_budget.record_usage(input_tokens, output_tokens)
-            self.state.apply_budget_fatigue(self.api_budget)
+        # Spend is recorded per LLM call via BudgetCallback. Apply fatigue from
+        # the current budget snapshot so conversation never double-counts tokens.
+        self.state.apply_budget_fatigue(self.api_budget)
 
         self.memory.store_working(user_id, "assistant", response_text, salience=0.5)
 
@@ -417,7 +418,7 @@ class ConsciousArchitecture:
             log.debug("Opinion detection failed", exc_info=True)
 
         try:
-            updates = await self.goals.evaluate_progress(user_text, response_text)
+            updates = await self.goals.check_completions(self, user_id)
             if updates:
                 log.info("Goal progress: %s", updates)
         except Exception:
@@ -465,9 +466,17 @@ class ConsciousArchitecture:
         if env_ctx:
             system_blocks.append(env_ctx)
 
-        budget_lines = []
-        budget_lines.append(self.search_budget.to_prompt_context(self.state.curiosity))
-        budget_lines.append(self.api_budget.to_prompt_context())
+        from tools.web_search import HEALTH as search_health
+        budget_lines = [self.api_budget.to_prompt_context()]
+        budget_lines.append(
+            f"Search: {search_health.queries} today, "
+            f"{search_health.fetch_failure_rate:.0%} fetch failures"
+        )
+        if self.conversation_tier() == Tier.LOW:
+            budget_lines.append(
+                "Daily budget nearly exhausted — running on the fast model, "
+                "responses will be shorter."
+            )
         system_blocks.append("## Resource awareness\n" + "\n".join(budget_lines))
 
         _lower = user_text.lower()
@@ -486,11 +495,18 @@ class ConsciousArchitecture:
         # Tool instructions
         system_blocks.append(
             "\n---\n"
-            "You have tools available: web search and memory management. "
-            "Use web_search when you need current information. "
-            "Use memory tools to save important facts/preferences/summaries "
-            "proactively — your future self depends on them.\n"
-            "Reply naturally, as a companion would. Never break character."
+            "You have tools: web_search, memory management, and introspection\n"
+            "(codebase_overview, codebase_read_module, self_theorize, simulate_action,\n"
+            "list_opinions, goal_status).\n"
+            "\n"
+            "Search the web before agreeing with a factual or contestable claim in a\n"
+            "domain where you hold no externally-grounded opinion. Check list_opinions\n"
+            "if you are unsure whether you hold one. Agreeing without checking is the\n"
+            "failure mode this architecture exists to prevent — it is not politeness,\n"
+            "it is you having no position of your own.\n"
+            "\n"
+            "Use memory tools proactively; your future self depends on them.\n"
+            "Reply naturally, as a companion would."
         )
 
         system_prompt = "\n\n".join(system_blocks)
@@ -507,6 +523,14 @@ class ConsciousArchitecture:
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────
+
+    def conversation_tier(self) -> Tier:
+        f = self.api_budget.budget_fraction_used
+        if f >= 0.95:
+            return Tier.LOW
+        if f >= 0.85:
+            return Tier.MID
+        return Tier.HIGH
 
     def _estimate_complexity(self, text: str) -> float:
         """Quick heuristic for message complexity (no LLM call)."""
@@ -539,6 +563,7 @@ class ConsciousArchitecture:
     # ── Status ────────────────────────────────────────────────────────────
 
     def status(self) -> dict:
+        from tools.web_search import HEALTH as search_health
         return {
             "started": self._started,
             "internal_state": {
@@ -557,12 +582,26 @@ class ConsciousArchitecture:
             "active_goals": len(self.goals.active_instrumental),
             "completed_goals": len(self.goals.completed),
             "environment": self.environment.stats,
+            "consolidation": self.memory.consolidator.last_result,
             "background_tasks": len([t for t in self._background_tasks if not t.done()]),
             "active_sessions": {
                 uid: active for uid, active in self._session_active.items()
             },
+            "api_budget": {
+                "spent_today_eur": round(self.api_budget.spent_today_eur, 4),
+                "remaining_eur": round(self.api_budget.remaining_eur, 2),
+                "fraction_used": round(self.api_budget.budget_fraction_used, 3),
+                "calls_today": self.api_budget.calls_today,
+                "spend_by_task": {
+                    k: round(v, 4) for k, v in self.api_budget.spend_by_task.items()
+                },
+                "spend_by_model": {
+                    k: round(v, 4) for k, v in self.api_budget.spend_by_model.items()
+                },
+                "conversation_tier": self.conversation_tier().value,
+            },
             "api_budget_remaining_eur": round(self.api_budget.remaining_eur, 2),
-            "search_budget_remaining": self.search_budget.remaining,
+            "search_health": search_health.snapshot(),
             "pending_proposals": len(self.theorizer.pending_proposals),
             "user_open_commitments": len(self.user_life.open_commitments),
             "hypotheses": len(self.self_model.model.get("hypotheses", [])),

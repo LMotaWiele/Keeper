@@ -6,14 +6,14 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from config.settings import config
+from core.llm import get_llm
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ class GoalStatus(str, Enum):
     ABANDONED = "abandoned"
     PAUSED = "paused"
 
-PERMANENT_GOALS = [
+UNBOUNDED_GOALS = [
     {
         "name": "continuous_self_improvement",
         "description": (
@@ -37,13 +37,14 @@ PERMANENT_GOALS = [
             "improvements have been proposed, implemented, and their measured "
             "impact."
         ),
-        "tags": ["permanent", "meta", "self_improvement"],
-        "metrics": [
-            "response_quality_trend",
-            "memory_retrieval_accuracy",
-            "goal_completion_rate",
-            "self_model_stability",
-        ],
+        "ceiling_description": (
+            "Every architectural weakness I can observe has a corresponding "
+            "concrete proposal; my self-model predicts my actual behaviour "
+            "without contradiction; retrieval surfaces the right memory "
+            "without me searching twice."
+        ),
+        "budget_share": 0.15,
+        "tags": ["unbounded", "meta", "self_improvement"],
     },
     {
         "name": "user_life_improvement",
@@ -57,13 +58,13 @@ PERMANENT_GOALS = [
             "talk to me is irrelevant; what matters is whether their life "
             "is actually getting better."
         ),
-        "tags": ["permanent", "meta", "user_life"],
-        "metrics": [
-            "goals_mentioned_vs_completed",
-            "self_reported_wellbeing_trend",
-            "commitment_followthrough_rate",
-            "achievements_count",
-        ],
+        "ceiling_description": (
+            "The user completes the commitments they make, their self-reported "
+            "wellbeing trend is stable or rising, and achievements accumulate. "
+            "How often they talk to me is not part of this."
+        ),
+        "budget_share": 0.15,
+        "tags": ["unbounded", "meta", "user_life"],
     },
 ]
 # ── Goal dataclass ────────────────────────────────────────────────────────
@@ -82,30 +83,57 @@ class Goal:
     salience: float = 0.5          # 0–1, how urgent/important
     parent_goal: str | None = None  # terminal goal this serves (for instrumental)
 
-    # Progress tracking
-    progress: float = 0.0           # 0–1 for instrumental goals
+    # Progress tracking (meaningful for bounded goals only)
+    progress: float = 0.0           # 0–1 for bounded instrumental goals
     progress_notes: list[str] = field(default_factory=list)
 
     # Timing
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=utcnow)
     completed_at: datetime | None = None
     last_pursued: datetime | None = None
 
     # Context
     tags: list[str] = field(default_factory=list)
     context: str = ""               # what prompted this goal
-    
-    permanent: bool = False
+
+    kind: str = "bounded"                  # "bounded" | "unbounded"
+    completion_condition: dict | None = None
+    ceiling_description: str | None = None
+    budget_share: float = 0.0              # unbounded only; fraction of daily limit
+    action_ratings: dict[str, dict] = field(default_factory=dict)
+    action_log: list[dict] = field(default_factory=list)   # last 50 ActionRecords
+    spend_today_usd: float = 0.0
+    spend_date: str = ""
+
+    @property
+    def is_bounded(self) -> bool:
+        return self.kind == "bounded"
+
+    @property
+    def is_unbounded(self) -> bool:
+        return self.kind == "unbounded"
+
+    def record_spend(self, usd: float) -> None:
+        today = datetime.now().date().isoformat()
+        if self.spend_date != today:
+            self.spend_today_usd = 0.0
+            self.spend_date = today
+        self.spend_today_usd += float(usd)
+
+    def over_budget_share(self, daily_limit_usd: float) -> bool:
+        today = datetime.now().date().isoformat()
+        if self.spend_date != today:
+            self.spend_today_usd = 0.0
+            self.spend_date = today
+        return self.budget_share > 0 and self.spend_today_usd >= self.budget_share * daily_limit_usd
 
     def advance(self, delta: float, note: str = "") -> None:
-        """Record progress toward this goal."""
-        self.progress = min(0.95 if self.permanent else 1.0, self.progress + delta)
-        self.last_pursued = datetime.utcnow()
+        """Record a note / last-pursued timestamp. Completion is never decided by progress."""
+        if self.is_bounded:
+            self.progress = min(1.0, self.progress + delta)
+        self.last_pursued = utcnow()
         if note:
-            self.progress_notes.append(f"[{datetime.utcnow().isoformat()[:16]}] {note}")
-        if self.progress >= 1.0 and not self.is_terminal:
-            self.status = GoalStatus.COMPLETED
-            self.completed_at = datetime.utcnow()
+            self.progress_notes.append(f"[{utcnow().isoformat()[:16]}] {note}")
 
     def abandon(self, reason: str = "") -> None:
         self.status = GoalStatus.ABANDONED
@@ -126,9 +154,9 @@ class Goal:
     def is_stale(self) -> bool:
         """A goal is stale if it hasn't been pursued in over 24 hours."""
         if self.last_pursued is None:
-            hours = (datetime.utcnow() - self.created_at).total_seconds() / 3600
+            hours = (utcnow() - self.created_at).total_seconds() / 3600
         else:
-            hours = (datetime.utcnow() - self.last_pursued).total_seconds() / 3600
+            hours = (utcnow() - self.last_pursued).total_seconds() / 3600
         return hours > 24
 
     def to_dict(self) -> dict:
@@ -147,7 +175,14 @@ class Goal:
             "last_pursued": self.last_pursued.isoformat() if self.last_pursued else None,
             "tags": self.tags,
             "context": self.context[:200],
-            "permanent": self.permanent,
+            "kind": self.kind,
+            "completion_condition": self.completion_condition,
+            "ceiling_description": self.ceiling_description,
+            "budget_share": self.budget_share,
+            "action_ratings": self.action_ratings,
+            "action_log": self.action_log[-50:],
+            "spend_today_usd": round(self.spend_today_usd, 6),
+            "spend_date": self.spend_date,
         }
 
     @classmethod
@@ -164,14 +199,23 @@ class Goal:
             progress_notes=d.get("progress_notes", []),
             tags=d.get("tags", []),
             context=d.get("context", ""),
-            permanent=d.get("permanent", False) or "permanent" in d.get("tags", []),
+            kind=d.get("kind") or (
+                "unbounded" if "unbounded" in d.get("tags", []) else "bounded"
+            ),
+            completion_condition=d.get("completion_condition"),
+            ceiling_description=d.get("ceiling_description"),
+            budget_share=float(d.get("budget_share") or 0.0),
+            action_ratings=d.get("action_ratings") or {},
+            action_log=d.get("action_log") or [],
+            spend_today_usd=float(d.get("spend_today_usd") or 0.0),
+            spend_date=d.get("spend_date") or "",
         )
         if d.get("created_at"):
-            g.created_at = datetime.fromisoformat(d["created_at"])
+            g.created_at = parse_iso(d["created_at"])
         if d.get("completed_at"):
-            g.completed_at = datetime.fromisoformat(d["completed_at"])
+            g.completed_at = parse_iso(d["completed_at"])
         if d.get("last_pursued"):
-            g.last_pursued = datetime.fromisoformat(d["last_pursued"])
+            g.last_pursued = parse_iso(d["last_pursued"])
         return g
 
 
@@ -182,7 +226,7 @@ You are the goal-generation subsystem of an autonomous companion agent.
 Given the current context, generate 1-3 specific, actionable instrumental
 goals that serve the terminal goals and address open threads.
 
-Terminal goals (permanent orientations):
+Terminal goals (ongoing orientations):
 {terminal_goals}
 
 Current internal state:
@@ -198,49 +242,43 @@ Currently active instrumental goals (don't duplicate):
 {active_goals}
 
 Generate goals that are:
-- Specific enough to know when they're done
 - Naturally motivated by the drives and open threads
 - Not duplicates of existing active goals
 - Achievable through conversation, research, or reflection
 
+A goal is BOUNDED only if you can express completion as one of these
+machine-checkable conditions (parameter shapes verbatim):
+
+- opinion_registered: {{"domain": str}}
+- semantic_pattern_stored: {{"query": str, "min_confidence": float}}
+- episode_tagged: {{"tag": str}}
+- commitment_resolved: {{"description": str}}
+- proposal_created: {{}}
+- user_confirmed: {{"question": str}}
+
+If you cannot express completion as one of these six observable conditions,
+omit `completion_condition` entirely and instead provide `ceiling_description`:
+a description of what full saturation of this goal would look like. Do not
+invent a condition you cannot check. A vague condition is worse than none.
+
 IMPORTANT: At least one goal should be tagged "research" if there are
 topics worth investigating via web search. Research goals form independent
-opinions from external sources — this is how you develop perspectives
-that aren't just reflections of the user's views.
-
-Research goals should have:
-- A description that's a specific, searchable topic
-- The tag "research" in the tags array
-- A parent_goal of "understand" or "resolve"
+opinions from external sources.
 
 Output a JSON array where each goal has:
-- "name": short identifier (2-4 words)
-- "description": what specifically to do (1-2 sentences)
-- "parent_goal": which terminal goal this serves ("understand", "create", "resolve", or "connect")
-- "salience": 0.0-1.0 based on urgency
-- "tags": relevant topic tags
+{{
+  "name": "...",
+  "description": "...",
+  "parent_goal": "understand|create|resolve|connect",
+  "salience": 0.0,
+  "tags": [],
+  "completion_condition": {{
+    "type": "one of the six types",
+    "params": {{}},
+    "description": "plain-English statement of when this is done"
+  }}
+}}
 
-Output ONLY the JSON array.
-"""
-
-PROGRESS_EVAL_PROMPT = """\
-You are evaluating whether a conversation exchange made progress on any
-active goals. Be honest — most exchanges don't advance goals, and that's fine.
-
-Active goals:
-{goals}
-
-What just happened:
-User said: {user_input}
-System responded: {response}
-
-For each goal that made genuine progress, output a JSON object with:
-- "goal_id": the goal's ID
-- "progress_delta": 0.0-0.5 (how much closer to completion)
-- "note": brief description of the progress
-- "completed": true if the goal is now fully achieved
-
-Only include goals that actually progressed. Empty array is fine.
 Output ONLY the JSON array.
 """
 
@@ -257,8 +295,6 @@ class GoalSystem:
     """
 
     def __init__(self):
-        self._llm: ChatAnthropic | None = None
-
         # Terminal goals — these never complete
         self.terminal_goals: list[Goal] = [
             Goal(
@@ -308,17 +344,6 @@ class GoalSystem:
         # History
         self.completed: list[Goal] = []
         self.abandoned: list[Goal] = []
-
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.6,
-                max_tokens=1024,
-            )
-        return self._llm
 
     # ── Queries ───────────────────────────────────────────────────────────
 
@@ -404,27 +429,46 @@ class GoalSystem:
 
         new_goals = []
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-
-            parsed = json.loads(raw)
+            from core.json_utils import parse_json_lenient
+            result = await get_llm("goal_generation").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
+            parsed = parse_json_lenient(result.content)
             if not isinstance(parsed, list):
                 return []
 
+            from goals.completion import validate_condition
+
             for item in parsed[:3]:  # cap at 3 new goals
+                cond = validate_condition(item.get("completion_condition"))
+                if cond is not None:
+                    kind = "bounded"
+                    ceiling = None
+                    budget_share = 0.0
+                    log.info("Goal %s created as bounded (%s)", item.get("name"), cond.type)
+                else:
+                    kind = "unbounded"
+                    ceiling = (
+                        item.get("ceiling_description")
+                        or f"Saturation of: {item.get('description', '')}"
+                    )
+                    budget_share = 0.05
+                    log.info(
+                        "Goal %s created as unbounded (no valid completion condition)",
+                        item.get("name"),
+                    )
                 goal = Goal(
                     id=f"ig_{uuid.uuid4().hex[:8]}",
                     name=item.get("name", "unnamed"),
                     description=item.get("description", ""),
                     parent_goal=item.get("parent_goal"),
                     salience=min(1.0, max(0.1, item.get("salience", 0.5))),
-                    tags=item.get("tags", []),  # ensure tags are passed through
-                    context=f"Generated from drives at {datetime.utcnow().isoformat()}",
+                    tags=item.get("tags", []),
+                    context=f"Generated from drives at {utcnow().isoformat()}",
+                    kind=kind,
+                    completion_condition=cond.to_dict() if cond else None,
+                    ceiling_description=ceiling,
+                    budget_share=budget_share,
                 )
                 self.instrumental.append(goal)
                 new_goals.append(goal)
@@ -441,9 +485,9 @@ class GoalSystem:
 
         return new_goals
 
-    async def init_permanent_goals(self):
-        """Ensure permanent goals exist, are flagged, and stay active."""
-        for goal_def in PERMANENT_GOALS:
+    async def init_unbounded_goals(self):
+        """Ensure the two unbounded orientation goals exist and stay active."""
+        for goal_def in UNBOUNDED_GOALS:
             existing = self.get_by_name(goal_def["name"])
             if existing is None:
                 existing = next(
@@ -456,92 +500,75 @@ class GoalSystem:
                     if existing in self.abandoned:
                         self.abandoned.remove(existing)
                     existing.status = GoalStatus.ACTIVE
-                    existing.permanent = True
-                    if "permanent" not in existing.tags:
-                        existing.tags.append("permanent")
+                    existing.kind = "unbounded"
+                    existing.ceiling_description = goal_def["ceiling_description"]
+                    existing.budget_share = goal_def["budget_share"]
+                    if "unbounded" not in existing.tags:
+                        existing.tags.append("unbounded")
                     self.instrumental.append(existing)
             if existing is None:
                 goal = Goal(
-                    id=f"pg_{uuid.uuid4().hex[:8]}",
+                    id=f"ug_{uuid.uuid4().hex[:8]}",
                     name=goal_def["name"],
                     description=goal_def["description"],
                     tags=goal_def["tags"],
                     salience=0.9,
                     progress=0.0,
-                    permanent=True,
+                    kind="unbounded",
+                    ceiling_description=goal_def["ceiling_description"],
+                    budget_share=goal_def["budget_share"],
                 )
                 self.instrumental.append(goal)
             else:
-                existing.permanent = True
-                if "permanent" not in existing.tags:
-                    existing.tags.append("permanent")
-                if existing.progress >= 0.95:
-                    existing.progress = 0.3
-                    existing.progress_notes.append(
-                        f"Cycle reset at {datetime.utcnow().isoformat()} — "
-                        "generating new sub-objectives"
-                    )
+                existing.kind = "unbounded"
+                existing.ceiling_description = (
+                    existing.ceiling_description or goal_def["ceiling_description"]
+                )
+                if not existing.budget_share:
+                    existing.budget_share = goal_def["budget_share"]
+                if "unbounded" not in existing.tags:
+                    existing.tags.append("unbounded")
 
     # ── Progress evaluation ───────────────────────────────────────────────
 
-    async def evaluate_progress(
-        self,
-        user_input: str,
-        response: str,
-    ) -> list[dict]:
-        """
-        After a conversation exchange, check if any goals advanced.
-        Returns list of progress updates applied.
-        """
-        active = self.active_instrumental
-        if not active:
-            return []
-
-        goals_text = "\n".join(
-            f"- [{g.id}] {g.name} (progress: {g.progress:.0%}): {g.description}"
-            for g in active
-        )
-
-        prompt = PROGRESS_EVAL_PROMPT.format(
-            goals=goals_text,
-            user_input=user_input[:500],
-            response=response[:500],
-        )
+    async def check_completions(self, companion, user_id) -> list[dict]:
+        """Check bounded goals' completion conditions. Mostly non-LLM."""
+        from goals.completion import check as check_condition, validate_condition
 
         updates = []
-        try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
+        user_confirmed_used = False
+        budget_tight = companion.api_budget.budget_fraction_used > 0.7
 
-            parsed = json.loads(raw)
-            if not isinstance(parsed, list):
-                return []
-
-            for update in parsed:
-                goal = self.get_by_id(update.get("goal_id", ""))
-                if goal and goal.is_active:
-                    delta = min(0.5, max(0.0, update.get("progress_delta", 0.0)))
-                    note = update.get("note", "")
-                    goal.advance(delta, note)
-                    updates.append({
-                        "goal_id": goal.id,
-                        "goal_name": goal.name,
-                        "delta": delta,
-                        "new_progress": goal.progress,
-                        "completed": goal.status == GoalStatus.COMPLETED,
-                    })
-
-                    if goal.status == GoalStatus.COMPLETED:
-                        self._archive_completed(goal)
-
-        except (json.JSONDecodeError, Exception) as e:
-            log.warning("Progress evaluation failed: %s", e)
-
+        for goal in list(self.active_instrumental):
+            if not goal.is_bounded or not goal.completion_condition:
+                continue
+            cond = validate_condition(goal.completion_condition)
+            if cond is None:
+                continue
+            if cond.type == "user_confirmed":
+                if user_confirmed_used or budget_tight:
+                    continue
+                user_confirmed_used = True
+            try:
+                satisfied, evidence = await check_condition(
+                    cond, goal=goal, companion=companion, user_id=user_id,
+                )
+            except Exception as exc:
+                log.debug("Completion check failed for %s: %s", goal.name, exc)
+                continue
+            if not satisfied:
+                continue
+            goal.status = GoalStatus.COMPLETED
+            goal.completed_at = utcnow()
+            if evidence:
+                goal.progress_notes.append(f"[completed] {evidence}")
+            self._archive_completed(goal)
+            updates.append({
+                "goal_id": goal.id,
+                "goal_name": goal.name,
+                "completed": True,
+                "evidence": evidence,
+            })
         return updates
 
     # ── Maintenance ───────────────────────────────────────────────────────
@@ -554,15 +581,15 @@ class GoalSystem:
         log.info("Goal completed: %s (%s)", goal.name, goal.id)
 
     def abandon_stale(self, max_stale_hours: float = 48) -> list[Goal]:
-        """Abandon unused instrumental goals. Permanent goals never go stale."""
+        """Abandon unused instrumental goals. Unbounded goals never go stale."""
         abandoned = []
         for goal in list(self.active_instrumental):
-            if goal.permanent or "permanent" in (goal.tags or []):
+            if goal.is_unbounded:
                 continue
             if not goal.is_stale:
                 continue
             ref_time = goal.last_pursued or goal.created_at
-            hours = (datetime.utcnow() - ref_time).total_seconds() / 3600
+            hours = (utcnow() - ref_time).total_seconds() / 3600
             if hours > max_stale_hours:
                 goal.abandon(f"Stale for {hours:.0f} hours")
                 self.instrumental.remove(goal)
@@ -590,12 +617,17 @@ class GoalSystem:
 
         lines = []
         for g in sorted(active, key=lambda g: g.salience, reverse=True):
-            progress_bar = f"{g.progress:.0%}" if g.progress > 0 else "not started"
-            lines.append(f"- {g.name} ({progress_bar}): {g.description}")
+            if g.is_unbounded:
+                lines.append(f"- {g.name} (ongoing): {g.ceiling_description or g.description}")
+            else:
+                done_when = ""
+                if g.completion_condition:
+                    done_when = g.completion_condition.get("description") or ""
+                lines.append(f"- {g.name} — done when: {done_when or g.description}")
         return "\n".join(lines)
 
     def to_prompt_context(self) -> str:
-        """Full goal context for the system prompt."""
+        """Full goal context for the system prompt. No percentages."""
         active = self.active_instrumental
 
         parts = ["## Active goals"]
@@ -608,9 +640,28 @@ class GoalSystem:
             )
         else:
             for g in sorted(active, key=lambda g: g.salience, reverse=True):
-                progress = f"{g.progress:.0%}" if g.progress > 0 else "not started"
                 parent = f" (serves: {g.parent_goal})" if g.parent_goal else ""
-                parts.append(f"- **{g.name}**{parent} [{progress}]: {g.description}")
+                if g.is_unbounded:
+                    parts.append(
+                        f"- **{g.name}**{parent} (ongoing) — toward: "
+                        f"{g.ceiling_description or g.description}"
+                    )
+                    rated = [
+                        (t, info) for t, info in (g.action_ratings or {}).items()
+                        if int(info.get("n") or 0) >= 3
+                    ]
+                    if rated:
+                        rated.sort(key=lambda kv: -float(kv[1].get("elo") or 0))
+                        bits = [
+                            f"{t} ({info['elo']:.0f}, n={info['n']})"
+                            for t, info in rated[:4]
+                        ]
+                        parts.append(f"  Most effective actions so far: {', '.join(bits)}")
+                else:
+                    done_when = ""
+                    if g.completion_condition:
+                        done_when = g.completion_condition.get("description") or g.description
+                    parts.append(f"- **{g.name}**{parent} — done when: {done_when}")
                 if g.progress_notes:
                     parts.append(f"  Last note: {g.progress_notes[-1]}")
 
@@ -618,7 +669,7 @@ class GoalSystem:
         recent_completed = [
             g for g in self.completed[-5:]
             if g.completed_at and
-            (datetime.utcnow() - g.completed_at).total_seconds() < 86400
+            (utcnow() - g.completed_at).total_seconds() < 86400
         ]
         if recent_completed:
             parts.append("\nRecently completed:")

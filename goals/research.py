@@ -6,10 +6,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from config.settings import config
+from core.llm import get_llm
 from core.opinions import OpinionRegistry, OpinionOrigin
 
 log = logging.getLogger(__name__)
@@ -105,17 +104,9 @@ If nothing is worth researching right now, output an empty array: []
 # ── Utility ───────────────────────────────────────────────────────────────
 
 def _parse_json(raw: str) -> Any:
-    """Parse JSON from LLM output, handling markdown fences."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
+    """Parse JSON from LLM output, handling markdown fences and truncation."""
+    from core.json_utils import parse_json_lenient
+    return parse_json_lenient(raw)
 
 
 # ── Research engine ───────────────────────────────────────────────────────
@@ -137,23 +128,11 @@ class ResearchEngine:
     ):
         self.opinions = opinion_registry
         self.memory = memory_system
-        self._llm: ChatAnthropic | None = None
         self._search_tool = None
 
     @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.5,
-                max_tokens=1536,
-            )
-        return self._llm
-
-    @property
     def search_tool(self):
-        """Lazy-load the Tavily search tool."""
+        """Lazy-load the search tool."""
         if self._search_tool is None:
             from tools.web_search import web_search_tool
             self._search_tool = web_search_tool
@@ -177,6 +156,7 @@ class ResearchEngine:
         Returns a dict with the research results, or None if it failed.
         """
         log.info("Researching topic: %s", topic)
+        episode_id = None
 
         # Step 1: Generate queries
         queries = await self._generate_queries(topic, context)
@@ -229,7 +209,7 @@ class ResearchEngine:
                 f"Reasoning: {synthesis['reasoning']}\n"
                 f"Dissenting view: {synthesis.get('dissenting_view', 'none noted')}"
             )
-            await self.memory.store_episode(
+            episode_id = await self.memory.store_episode(
                 user_id=user_id,
                 content=research_summary,
                 internal_state=None,
@@ -243,6 +223,7 @@ class ResearchEngine:
             "queries_used": queries[:3],
             "sources_found": len(all_results),
             "opinion_id": opinion.id,
+            "episode_id": episode_id,
             "domain": opinion.domain,
             "position": opinion.position,
             "conviction": opinion.conviction,
@@ -316,7 +297,9 @@ class ResearchEngine:
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            result = await get_llm("topic_extraction").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
             parsed = _parse_json(result.content)
             if isinstance(parsed, list):
                 return parsed[:3]  # cap at 3 suggestions
@@ -338,7 +321,9 @@ class ResearchEngine:
             context=context or "General curiosity",
         )
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            result = await get_llm("query_generation").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
             parsed = _parse_json(result.content)
             if isinstance(parsed, list) and all(isinstance(q, str) for q in parsed):
                 return parsed
@@ -361,7 +346,9 @@ class ResearchEngine:
             search_results=formatted_results,
         )
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            result = await get_llm("research_synthesis", json_mode=True).ainvoke(
+                [HumanMessage(content=prompt)]
+            )
             parsed = _parse_json(result.content)
             if isinstance(parsed, dict) and "position" in parsed:
                 return parsed
@@ -371,7 +358,7 @@ class ResearchEngine:
 
     @staticmethod
     def _format_search_results(results: list) -> str:
-        """Format raw Tavily results into a readable block for the LLM."""
+        """Format SearXNG + extracted-page results into a readable block for the LLM."""
         formatted = []
         seen_urls = set()
 
@@ -387,9 +374,9 @@ class ResearchEngine:
                 content = r.get("content", r.get("snippet", ""))
                 source = f" ({url})" if url else ""
                 formatted.append(
-                    f"[{i+1}] {title}{source}\n{content[:400]}"
+                    f"[{i+1}] {title}{source}\n{content[:1500]}"
                 )
             elif isinstance(r, str):
-                formatted.append(f"[{i+1}] {r[:400]}")
+                formatted.append(f"[{i+1}] {r[:1500]}")
 
         return "\n\n".join(formatted) if formatted else "No results found."

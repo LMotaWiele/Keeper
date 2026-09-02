@@ -6,15 +6,13 @@ See docs/goals-and-self.md.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from typing import Any, Callable
 from goals.research import ResearchEngine
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from config.settings import config
 from core.events import (
     GoalProgressEvent,
     GoalCompletedEvent,
@@ -22,38 +20,6 @@ from core.events import (
 )
 
 log = logging.getLogger(__name__)
-
-
-PURSUIT_PROMPT = """\
-You are an autonomous agent pursuing a goal during downtime (no user present).
-
-Goal: {goal_name}
-Description: {goal_description}
-Current progress: {progress}
-
-Your internal state:
-{state_context}
-
-Relevant memories:
-{memory_context}
-
-Self-model:
-{self_model_context}
-
-Take one concrete step toward this goal. You can:
-- Synthesise what you know about the topic into a clear understanding
-- Identify specific questions that need answering
-- Connect ideas from different conversations or memories
-- Prepare a useful framing or explanation you could share later
-- Note contradictions or gaps in your understanding
-- Reflect on why this goal matters given what you know about the user
-
-Write your step as a brief internal note (2-5 sentences). Be specific
-and substantive — this gets stored in memory and informs future behavior.
-
-After your note, output a JSON block on its own line:
-{{"progress_delta": 0.0-0.3, "summary": "one-line summary of what you did"}}
-"""
 
 
 class AutonomousEngine:
@@ -77,37 +43,19 @@ class AutonomousEngine:
         self.memory = memory_system
         self.self_model = self_model
         self.research = research_engine
-        self._llm: ChatAnthropic | None = None
         self._running = False
         self._last_action: datetime | None = None
         self.theorizer: Any | None = None    # SelfTheorizer, set by ConsciousArchitecture
         self.simulator: Any | None = None    # FutureSimulator, set by ConsciousArchitecture
 
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.7,
-                max_tokens=1024,
-            )
-        return self._llm
-
     async def take_research_action(self, user_id: int, goal) -> dict | None:
-        """
-        Execute a research goal — web search + opinion formation.
-        
-        Research goals have tag "research" and their description contains
-        the topic to investigate.
-        """
+        """Run web research + opinion formation. Does not complete the goal."""
         if not self.research:
-            log.warning("Research engine not available, falling back to standard pursuit")
+            log.warning("Research engine not available")
             return None
-        
+
         topic = goal.description
         context = f"Pursuing goal '{goal.name}' (serves: {goal.parent_goal})"
-        
         try:
             result = await self.research.research_topic(
                 topic=topic,
@@ -117,57 +65,18 @@ class AutonomousEngine:
         except Exception as e:
             log.warning("Research action failed: %s", e)
             return None
-        
-        if not result:
-            return None
-        
-        # One successful research pass completes the goal.
-        goal.advance(1.0, f"Formed opinion: {result['position'][:80]}")
-        if goal.status.value == "completed":
-            self.goals._archive_completed(goal)
-        
-        # Self-model observes the research
-        if self.self_model:
-            await self.self_model.observe(
-                user_id=user_id,
-                action=(
-                    f"Autonomously researched '{result['topic']}' "
-                    f"and formed opinion: {result['position'][:100]}"
-                ),
-                context=context,
-            )
-        
-        from core.events import GoalCompletedEvent
-        if self.state:
-            self.state.update(GoalCompletedEvent(
-                goal_id=goal.id,
-                goal_description=goal.description,
-            ))
-        
-        self._last_action = datetime.utcnow()
-        
-        log.info(
-            "Research action complete: %s → opinion [%s]",
-            goal.name, result['domain'],
-        )
-        
-        return {
-            "goal_id": goal.id,
-            "goal_name": goal.name,
-            "action": f"Researched and formed opinion: {result['position'][:150]}",
-            "progress_delta": 1.0,
-            "new_progress": 1.0,
-            "completed": True,
-            "research_result": result,
-        }
+        return result
 
     # ── Single action ─────────────────────────────────────────────────────
 
     async def take_action(self, user_id: int) -> dict | None:
-        """
-        Take one autonomous step toward the top goal.
-        Returns a dict with the action taken, or None if nothing to do.
-        """
+        """Take one rated autonomous step toward the highest-salience eligible goal."""
+        from core.llm import Tier, get_llm
+        from core.loop import companion
+        from goals.action_rating import ActionRecord, rate_action, select_action_type
+        from goals.completion import check as check_condition, validate_condition
+        from goals.system import GoalStatus
+
         active = self.goals.active_instrumental
         if not active:
             if self.state and self.state.drives and any(
@@ -178,179 +87,304 @@ class AutonomousEngine:
             if not active:
                 return None
 
-        # Tie-break: don't let continuous_self_improvement block every other 0.9 goal.
-        ranked = sorted(
-            active,
-            key=lambda g: (g.salience, 0 if g.name == "continuous_self_improvement" else 1),
-            reverse=True,
+        daily_limit_usd = (
+            companion.api_budget.daily_limit_eur / companion.api_budget.USD_TO_EUR
+            if companion.api_budget.USD_TO_EUR
+            else companion.api_budget.daily_limit_eur
         )
-
-        goal = None
-        for candidate in ranked:
-            if candidate.name == "continuous_self_improvement" and self.theorizer:
-                result = await self.theorizer.theorize(user_id, self.state)
-                if result:
-                    candidate.advance(
-                        0.1,
-                        f"Theorizing cycle: {len(result.get('proposals', []))} proposals",
-                    )
-                    return result
-                continue
-            goal = candidate
-            break
-        if goal is None:
+        eligible = [
+            g for g in active
+            if not (g.is_unbounded and g.over_budget_share(daily_limit_usd))
+        ]
+        if not eligible:
             return None
 
-        # Build context for the pursuit
-        state_context = self.state.to_prompt_context() if self.state else "No state available"
+        ranked = sorted(eligible, key=lambda g: g.salience, reverse=True)
+        goal = ranked[0]
 
-        # Get relevant memories
-        memory_context = "No memories available"
-        if self.memory:
-            try:
-                results = await self.memory.recall(
-                    user_id, goal.description, current_state=self.state
-                )
-                episodic_items = results.get("episodic", [])
-                semantic_items = results.get("semantic", [])
-                parts = []
-                if episodic_items:
-                    parts.append("Recent episodes:\n" + "\n".join(
-                        f"- {ep.get('content', '')[:200]}" for ep in episodic_items[:3]
-                    ))
-                if semantic_items:
-                    parts.append("Known patterns:\n" + "\n".join(
-                        f"- {s.get('content', '')[:200]}" for s in semantic_items[:3]
-                    ))
-                if parts:
-                    memory_context = "\n".join(parts)
-            except Exception as e:
-                log.debug("Memory recall failed for autonomous action: %s", e)
+        mid_ok = companion.api_budget.allows(Tier.MID, background=True)
+        unavailable: set[str] = set()
+        if not mid_ok:
+            unavailable.update({"web_research", "self_theorize", "future_simulate"})
+        if not self.research:
+            unavailable.add("web_research")
+        if not self.theorizer:
+            unavailable.add("self_theorize")
+        if not self.simulator:
+            unavailable.add("future_simulate")
+        if not getattr(companion, "codebase", None):
+            unavailable.add("codebase_read")
 
-        # Self-model context
-        self_model_context = "No self-model yet"
-        if self.self_model:
-            self_model_context = self.self_model.to_prompt_context() or self_model_context
+        action_type = select_action_type(goal, unavailable=unavailable)
+        spend_before = companion.api_budget.spent_today_eur
 
-        pursuit_description = goal.description
-        if self.simulator:
-            action_desc = f"[Autonomous] Goal '{goal.name}': {goal.description[:200]}"
-            goals_ctx = f"Active goals: {[g.name for g in self.goals.active_instrumental]}"
-            if await self.simulator.should_simulate(action_desc, self.state):
+        summary = ""
+        artifact_refs: list[str] = []
+
+        try:
+            if action_type == "web_research":
+                result = await self.take_research_action(user_id, goal)
+                if result:
+                    summary = (
+                        f"Researched and formed opinion: "
+                        f"{result.get('position', '')[:150]}"
+                    )
+                    if result.get("opinion_id"):
+                        artifact_refs.append(f"opinion:{result['opinion_id']}")
+                    if result.get("episode_id"):
+                        artifact_refs.append(f"episode:{result['episode_id']}")
+                    if self.self_model:
+                        await self.self_model.observe(
+                            user_id=user_id,
+                            action=summary,
+                            context=f"Goal: {goal.description}",
+                        )
+                else:
+                    summary = "Web research produced nothing"
+
+            elif action_type == "self_theorize":
+                result = await self.theorizer.theorize(user_id, self.state)
+                proposals = (result or {}).get("proposals") or []
+                summary = f"Theorizing cycle: {len(proposals)} proposals"
+                artifact_refs = [f"proposal:{i}" for i, _ in enumerate(proposals)]
+
+            elif action_type == "future_simulate":
+                action_desc = f"[Autonomous] Goal '{goal.name}': {goal.description[:200]}"
                 sim = await self.simulator.simulate(
                     action_description=action_desc,
                     conversation_context="No active session",
                     internal_state=self.state,
-                    memory_context=memory_context,
-                    goals_context=goals_ctx,
+                    memory_context="",
+                    goals_context=f"Active goals: {[g.name for g in self.goals.active_instrumental]}",
                 )
-                if sim and sim.get("recommendation") == "abandon":
-                    goal.progress_notes.append(
-                        f"Action abandoned after simulation: {sim.get('reasoning', '')[:200]}"
+                if sim:
+                    summary = (
+                        f"Simulated next step: {sim.get('recommendation')} — "
+                        f"{(sim.get('reasoning') or '')[:180]}"
                     )
-                    return None
-                if sim and sim.get("recommendation") == "modify":
-                    modified_desc = sim.get("suggested_modification") or ""
-                    if modified_desc:
-                        pursuit_description = modified_desc
+                    if self.memory:
+                        ep_id = await self.memory.store_episode(
+                            user_id=user_id,
+                            content=f"[Simulation] {goal.name}: {summary}",
+                            internal_state=self.state,
+                            salience=0.5,
+                            type="event",
+                            tags=["autonomous", "simulation", goal.name],
+                        )
+                        artifact_refs = [f"episode:{ep_id}"]
+                else:
+                    summary = "Simulation produced no result"
 
-        if "research" in (goal.tags or []) and self.research:
-            return await self.take_research_action(user_id, goal)
+            elif action_type == "codebase_read":
+                modules = list(companion.codebase.index.keys()) if companion.codebase else []
+                chosen = modules[0] if modules else ""
+                if modules:
+                    pick_prompt = (
+                        f"Goal: {goal.name} — {goal.description}\n"
+                        f"Modules:\n" + "\n".join(f"- {m}" for m in modules[:40]) +
+                        "\nPick ONE module path most relevant to this goal. "
+                        "Output ONLY the path."
+                    )
+                    try:
+                        pick = await get_llm("autonomous_pursuit").ainvoke(
+                            [HumanMessage(content=pick_prompt)]
+                        )
+                        text = (pick.content or "").strip().strip("`")
+                        for m in modules:
+                            if m in text:
+                                chosen = m
+                                break
+                    except Exception:
+                        pass
+                detail = companion.codebase.get_module_detail(chosen) if chosen else ""
+                analysis_prompt = (
+                    f"Goal: {goal.name} — {goal.description}\n"
+                    f"Module detail:\n{detail[:4000]}\n"
+                    "Write a short analysis of how this module relates to the goal "
+                    "and one concrete observation."
+                )
+                analysis = await get_llm("autonomous_pursuit").ainvoke(
+                    [HumanMessage(content=analysis_prompt)]
+                )
+                summary = f"Read {chosen}: {(analysis.content or '')[:200]}"
+                if self.memory:
+                    ep_id = await self.memory.store_episode(
+                        user_id=user_id,
+                        content=f"[Codebase] {chosen}: {analysis.content}",
+                        internal_state=self.state,
+                        salience=0.5,
+                        type="event",
+                        tags=["autonomous", "codebase", goal.name],
+                    )
+                    artifact_refs = [f"episode:{ep_id}"]
 
-        prompt = PURSUIT_PROMPT.format(
-            goal_name=goal.name,
-            goal_description=pursuit_description,
-            progress=f"{goal.progress:.0%}",
-            state_context=state_context,
-            memory_context=memory_context,
-            self_model_context=self_model_context,
-        )
-
-        try:
-            response = await self.llm.ainvoke([
-                HumanMessage(content=prompt),
-            ])
-            text = response.content
-
-            # Parse progress delta from the JSON block
-            progress_delta = 0.05
-            note = text
-            try:
-                # Find the last JSON block in the response
-                json_start = text.rfind("{")
-                json_end = text.rfind("}") + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_block = json.loads(text[json_start:json_end])
-                    progress_delta = json_block.get("progress_delta", 0.05)
-                    note = text[:json_start].strip()
-            except json.JSONDecodeError:
-                pass
-
-            # Update goal progress
-            goal.advance(progress_delta, note[:200])
-
-            # Store the action as an episodic memory
-            if self.memory:
-                await self.memory.store_episode(
+            elif action_type == "memory_synthesis":
+                recalled = {"episodic": [], "semantic": []}
+                if self.memory:
+                    recalled = await self.memory.recall(
+                        user_id, goal.description, current_state=self.state,
+                    )
+                blob = "\n".join(
+                    f"- {ep.get('content', '')[:200]}"
+                    for ep in (recalled.get("episodic") or [])[:8]
+                )
+                prompt = (
+                    f"Goal: {goal.name} — {goal.description}\n"
+                    f"Recalled episodes:\n{blob or '(none)'}\n"
+                    "Extract one durable pattern as JSON: "
+                    '{"content": "...", "type": "preference|trait|knowledge|behavioral"}'
+                )
+                from core.json_utils import parse_json_lenient
+                result = await get_llm("pattern_extraction", json_mode=True).ainvoke(
+                    [HumanMessage(content=prompt)]
+                )
+                parsed = parse_json_lenient(result.content)
+                raw = (result.content or "")
+                if isinstance(parsed, list):
+                    parsed = parsed[0] if parsed else {}
+                content = (parsed or {}).get("content") or raw[:300]
+                from memory.semantic import semantic
+                doc_id = await semantic.store(
                     user_id=user_id,
-                    content=f"[Autonomous] Goal '{goal.name}': {note[:300]}",
-                    internal_state=self.state,
-                    salience=0.4,
-                    type="event",
-                    tags=["autonomous", "goal_pursuit", goal.name],
+                    content=content,
+                    pattern_type=(parsed or {}).get("type", "general"),
+                    confidence=0.6,
                 )
+                summary = f"Synthesised pattern: {content[:180]}"
+                artifact_refs = [f"semantic:{doc_id}"]
 
-            # Self-observe
-            if self.self_model:
-                await self.self_model.observe(
-                    user_id=user_id,
-                    action=f"Autonomous pursuit of '{goal.name}': {note[:200]}",
-                    context=f"Goal: {goal.description}",
-                    internal_state=self.state,
-                )
+            elif action_type == "consolidation_review":
+                from memory.semantic import semantic
+                candidates = await semantic.list_review_candidates(user_id)
+                if not candidates:
+                    summary = "No weak/invalidated patterns to review"
+                else:
+                    blob = "\n".join(
+                        f"[{i}] ({c['confidence']:.2f}{' invalidated' if c.get('invalidated') else ''}) "
+                        f"{c['content'][:200]}"
+                        for i, c in enumerate(candidates[:8])
+                    )
+                    prompt = (
+                        f"Goal: {goal.name}\nPatterns:\n{blob}\n"
+                        "For each, decide keep, revise, or drop. "
+                        'JSON array: [{"index": 0, "action": "keep|revise|drop", '
+                        '"content": "revised text if revise"}]'
+                    )
+                    from core.json_utils import parse_json_lenient
+                    result = await get_llm("contradiction_check", json_mode=True).ainvoke(
+                        [HumanMessage(content=prompt)]
+                    )
+                    parsed = parse_json_lenient(result.content)
+                    if isinstance(parsed, dict):
+                        parsed = parsed.get("decisions") or parsed.get("results") or []
+                    touched = []
+                    for decision in parsed or []:
+                        try:
+                            idx = int(decision.get("index", -1))
+                        except (TypeError, ValueError):
+                            continue
+                        if idx < 0 or idx >= len(candidates):
+                            continue
+                        cand = candidates[idx]
+                        act = str(decision.get("action") or "keep").lower()
+                        if act == "drop":
+                            await semantic.invalidate(
+                                user_id, cand["id"], reason="consolidation_review drop",
+                            )
+                            touched.append(cand["id"])
+                        elif act == "revise" and decision.get("content"):
+                            doc_id = await semantic.store(
+                                user_id=user_id,
+                                content=decision["content"],
+                                pattern_type=cand.get("metadata", {}).get("pattern_type", "general"),
+                                confidence=max(0.5, cand.get("confidence", 0.4)),
+                            )
+                            touched.append(doc_id)
+                        else:
+                            touched.append(cand["id"])
+                    summary = f"Reviewed {len(candidates[:8])} patterns, touched {len(touched)}"
+                    artifact_refs = [f"semantic:{d}" for d in touched]
 
-            # Fire appropriate event into internal state
-            if goal.status.value == "completed":
-                event = GoalCompletedEvent(
-                    goal_id=goal.id, goal_description=goal.description
-                )
             else:
-                event = GoalProgressEvent(
-                    goal_id=goal.id,
-                    goal_description=goal.description,
-                    progress_delta=progress_delta,
-                )
-            if self.state:
-                self.state.update(event)
-
-            self._last_action = datetime.utcnow()
-
-            action_result = {
-                "goal_id": goal.id,
-                "goal_name": goal.name,
-                "action": note[:200],
-                "progress_delta": progress_delta,
-                "new_progress": goal.progress,
-                "completed": goal.status.value == "completed",
-            }
-
-            log.info(
-                "Autonomous action: %s (+%.0f%% → %.0f%%)",
-                goal.name, progress_delta * 100, goal.progress * 100,
-            )
-
-            return action_result
+                summary = f"Unknown action type {action_type}"
 
         except Exception as e:
-            log.warning("Autonomous action failed for goal %s: %s", goal.name, e)
-
-            # Fire frustration event
+            log.warning("Autonomous action failed for goal %s (%s): %s", goal.name, action_type, e)
             if self.state:
-                self.state.update(GoalFrustratedEvent(
-                    goal_id=goal.id, reason=str(e)
+                self.state.update(GoalFrustratedEvent(goal_id=goal.id, reason=str(e)))
+            return None
+
+        cost_eur = max(0.0, companion.api_budget.spent_today_eur - spend_before)
+        cost_usd = (
+            cost_eur / companion.api_budget.USD_TO_EUR
+            if companion.api_budget.USD_TO_EUR
+            else cost_eur
+        )
+        goal.record_spend(cost_usd)
+        goal.last_pursued = utcnow()
+        if summary:
+            goal.progress_notes.append(f"[{utcnow().isoformat()[:16]}] {summary[:200]}")
+
+        import uuid as _uuid
+        record = ActionRecord(
+            id=_uuid.uuid4().hex[:10],
+            goal_id=goal.id,
+            action_type=action_type,
+            summary=summary or action_type,
+            artifact_refs=artifact_refs,
+            cost_usd=cost_usd,
+            elo=0.0,
+            timestamp=utcnow().isoformat(),
+        )
+        await rate_action(goal, record, companion)
+
+        completed = False
+        if goal.is_bounded and goal.completion_condition:
+            cond = validate_condition(goal.completion_condition)
+            if cond is not None:
+                satisfied, evidence = await check_condition(
+                    cond, goal=goal, companion=companion, user_id=user_id,
+                )
+                if satisfied:
+                    goal.status = GoalStatus.COMPLETED
+                    goal.completed_at = utcnow()
+                    goal.progress_notes.append(f"[completed] {evidence}")
+                    self.goals._archive_completed(goal)
+                    if self.state:
+                        self.state.update(GoalCompletedEvent(
+                            goal_id=goal.id, goal_description=goal.description,
+                        ))
+                    completed = True
+                elif self.state:
+                    self.state.update(GoalProgressEvent(
+                        goal_id=goal.id,
+                        goal_description=goal.description,
+                        progress_delta=0.0,
+                    ))
+        elif goal.is_unbounded:
+            if self.state:
+                self.state.update(GoalProgressEvent(
+                    goal_id=goal.id,
+                    goal_description=goal.description,
+                    progress_delta=0.05,
                 ))
 
-            return None
+        self._last_action = utcnow()
+        action_result = {
+            "goal_id": goal.id,
+            "goal_name": goal.name,
+            "action": summary[:200],
+            "action_type": action_type,
+            "elo": record.elo,
+            "artifact_refs": artifact_refs,
+            "cost_usd": cost_usd,
+            "completed": completed,
+        }
+        log.info(
+            "Autonomous action: %s type=%s elo=%.0f artifacts=%s",
+            goal.name, action_type, record.elo, artifact_refs,
+        )
+        return action_result
 
     async def _generate_research_goals(self, user_id: int) -> None:
         """Generate research goals when independence score is low."""
@@ -369,8 +403,9 @@ class AutonomousEngine:
         
         import uuid
         from goals.system import Goal
-        
+
         for t in topics[:2]:  # cap at 2 research goals at a time
+            domain = t["topic"][:40].replace(" ", "_").lower()
             goal = Goal(
                 id=f"ig_{uuid.uuid4().hex[:8]}",
                 name=f"research_{t['topic'][:30].replace(' ', '_').lower()}",
@@ -379,6 +414,15 @@ class AutonomousEngine:
                 salience=0.7,
                 tags=["research", "external_grounding"],
                 context=t.get("context", ""),
+                kind="bounded",
+                completion_condition={
+                    "type": "opinion_registered",
+                    "params": {"domain": domain},
+                    "description": (
+                        f"An independent or external opinion is registered on {t['topic']}"
+                    ),
+                    "created_at": utcnow().isoformat(),
+                },
             )
             self.goals.instrumental.append(goal)
             log.info(
@@ -413,8 +457,14 @@ class AutonomousEngine:
                 log.debug("Autonomous action deferred — active session")
                 continue
 
+            from core.llm import Tier
+            from core.loop import companion
+            if not companion.api_budget.allows(Tier.LOW, background=True):
+                log.debug("Autonomous action skipped — background LOW budget gate")
+                continue
+
             if self.state:
-                idle = (datetime.utcnow() - self.state.last_updated).total_seconds() / 60
+                idle = (utcnow() - self.state.last_updated).total_seconds() / 60
                 if idle < min_idle_minutes:
                     continue
 

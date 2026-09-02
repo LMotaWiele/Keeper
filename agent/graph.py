@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -15,6 +14,7 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from config.settings import config
+from core.llm import Tier, get_llm
 from tools import ALL_TOOLS
 
 
@@ -25,20 +25,27 @@ class CompanionState(TypedDict):
     tool_calls_pending: bool
     response_text: str
     tool_calls_made: int
+    tier: str
 
 
-llm = ChatAnthropic(
-    model=config.llm_model,
-    anthropic_api_key=config.anthropic_api_key,
-    temperature=0.7,
-    max_tokens=2048,
-)
+_GRAPH_CACHE: dict[str, Any] = {}
 
-llm_with_tools = llm.bind_tools(ALL_TOOLS)
+
+def _llm_for_tier(tier: Tier):
+    """Build (and cache) a tool-bound chat model for a conversation tier."""
+    if tier.value not in _GRAPH_CACHE:
+        model = {
+            Tier.HIGH: config.model_high,
+            Tier.MID: config.model_mid,
+            Tier.LOW: config.model_low,
+        }[tier]
+        llm = get_llm("conversation", model=model)
+        _GRAPH_CACHE[tier.value] = llm.bind_tools(ALL_TOOLS)
+    return _GRAPH_CACHE[tier.value]
 
 
 def message_text(content: Any) -> str:
-    """Flatten Anthropic string or content-block lists to plain text."""
+    """Flatten string or content-block lists to plain text."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -69,6 +76,11 @@ async def load_context(state: CompanionState) -> dict[str, Any]:
 
 async def reason(state: CompanionState) -> dict[str, Any]:
     """One LLM step: reply and/or request tools."""
+    try:
+        tier = Tier(state.get("tier") or Tier.HIGH.value)
+    except ValueError:
+        tier = Tier.HIGH
+    llm_with_tools = _llm_for_tier(tier)
     messages = [SystemMessage(content=state["system_prompt"])] + state["messages"]
     response = await llm_with_tools.ainvoke(messages)
 
@@ -121,7 +133,7 @@ async def finalize(state: CompanionState) -> dict[str, Any]:
     return {}
 
 
-MAX_TOOL_CALLS = 8
+MAX_TOOL_CALLS = 12
 
 
 def route_after_reason(state: CompanionState) -> str:

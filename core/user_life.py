@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from core.timeutil import utcnow, parse_iso
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class LifeAchievement:
 class UserLifeTracker:
     """
     Tracks the user's actual life trajectory.
-    This is what the user_life_improvement permanent goal optimizes for.
+    This is what the user_life_improvement unbounded goal optimizes for.
     """
 
     commitments: list[UserCommitment] = field(default_factory=list)
@@ -52,7 +53,7 @@ class UserLifeTracker:
         """User said they'd do something — track it."""
         self.commitments.append(UserCommitment(
             description=description,
-            mentioned_at=datetime.utcnow().isoformat(),
+            mentioned_at=utcnow().isoformat(),
             deadline=deadline,
         ))
 
@@ -60,12 +61,12 @@ class UserLifeTracker:
         """Mark a commitment as completed, abandoned, or unknown."""
         if 0 <= index < len(self.commitments):
             self.commitments[index].status = status
-            self.commitments[index].resolved_at = datetime.utcnow().isoformat()
+            self.commitments[index].resolved_at = utcnow().isoformat()
 
     def record_wellbeing(self, mood: str, context: str, valence: float):
         """Snapshot of how the user seems to be doing."""
         self.wellbeing_history.append(WellbeingSnapshot(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=utcnow().isoformat(),
             mood=mood,
             context=context[:200],
             inferred_valence=max(-1.0, min(1.0, valence)),
@@ -78,7 +79,7 @@ class UserLifeTracker:
         """User accomplished something real."""
         self.achievements.append(LifeAchievement(
             description=description,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=utcnow().isoformat(),
             category=category,
             keeper_contributed=keeper_contributed,
         ))
@@ -120,7 +121,7 @@ class UserLifeTracker:
     @property
     def stale_commitments(self) -> list[UserCommitment]:
         """Commitments open for >7 days with no followup."""
-        cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        cutoff = (utcnow() - timedelta(days=7)).isoformat()
         return [
             c for c in self.commitments
             if c.status == "open" and c.mentioned_at < cutoff

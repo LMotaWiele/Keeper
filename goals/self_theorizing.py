@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from config.settings import config
+from core.llm import get_llm
 
 log = logging.getLogger(__name__)
 
@@ -83,25 +83,13 @@ class SelfTheorizer:
         self.codebase = codebase
         self.self_model = self_model
         self.memory = memory_system
-        self._llm: ChatAnthropic | None = None
         self._last_run: datetime | None = None
         self._proposals: list[dict] = []
-
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.6,
-                max_tokens=3000,
-            )
-        return self._llm
 
     async def theorize(self, user_id: int, internal_state: Any) -> dict | None:
         """Run one theorizing cycle. Returns the analysis or None."""
         if self._last_run and (
-            datetime.utcnow() - self._last_run
+            utcnow() - self._last_run
         ).total_seconds() < self.MIN_INTERVAL_HOURS * 3600:
             return None
 
@@ -126,16 +114,18 @@ class SelfTheorizer:
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-            analysis = json.loads(raw)
-            self._last_run = datetime.utcnow()
+            from core.json_utils import parse_json_lenient
+            result = await get_llm("self_theorize").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
+            analysis = parse_json_lenient(result.content)
+            if not isinstance(analysis, dict):
+                log.warning("Self-theorizing failed to parse")
+                return None
+            self._last_run = utcnow()
 
             for p in analysis.get("proposals", []):
-                p["generated_at"] = datetime.utcnow().isoformat()
+                p["generated_at"] = utcnow().isoformat()
                 p["status"] = "pending_review"
                 self._proposals.append(p)
 
@@ -184,5 +174,5 @@ class SelfTheorizer:
 
     def restore(self, data: dict):
         lr = data.get("last_run")
-        self._last_run = datetime.fromisoformat(lr) if lr else None
+        self._last_run = parse_iso(lr) if lr else None
         self._proposals = data.get("proposals", [])

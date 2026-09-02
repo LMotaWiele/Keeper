@@ -1,45 +1,44 @@
 # Goals, autonomy, and self-model
 
-## Goal tiers (`goals/system.py`)
+## Goal kinds (`goals/system.py`)
 
 **Terminal** — never complete. They are orientations: understand, create, resolve, connect, think independently.
 
-**Permanent instrumental** — long-running programs that cycle rather than finish:
+Kind is decided at creation, not later:
 
-- `continuous_self_improvement` — architecture and response quality
-- `user_life_improvement` — the user’s real-world outcomes
+- **Bounded** — has a machine-checkable `completion_condition` (one of six types: opinion registered, semantic pattern stored, episode tagged, commitment resolved, proposal created, user confirmed). It completes when the condition is satisfied. No LLM judgement about “how done” it is. `progress >= 1.0` never completes a goal.
+- **Unbounded** — cannot have a checkable condition. Has a `ceiling_description` (saturation referent for scoring) and a `budget_share` cap on daily spend. **No progress meter.** Trace is a rated action history (Elo over *action types*, pairwise, not absolute scores).
 
-Progress on permanent goals is capped at 0.95. At that point they reset toward 0.3 and start a new cycle. They must not be abandoned for staleness.
+The two orientation programs are unbounded:
 
-**Dynamic instrumental** — LLM-generated, max 5 active, completable. Research-tagged goals go through `ResearchEngine`. Stale non-permanent goals can be abandoned after 48 hours unused.
+- `continuous_self_improvement` — architecture and response quality (`budget_share` 0.15)
+- `user_life_improvement` — the user’s real-world outcomes (`budget_share` 0.15)
 
-After each user turn, `evaluate_progress()` asks whether the exchange actually moved a goal. Most turns move nothing; that is expected.
+Unbounded goals are never abandoned for staleness.
+
+**Dynamic instrumental** — LLM-generated, max 5 active. If the model cannot name a valid condition, the goal is created unbounded (`budget_share` 0.05). After each user turn, `check_completions()` runs the non-LLM checks (at most one `user_confirmed` LLM call, skipped above 70% budget).
+
+Action types: `web_research`, `self_theorize`, `future_simulate`, `codebase_read`, `memory_synthesis`, `consolidation_review`. An action with no artifacts is scored 1000 (unproductive) and skips the LLM rater.
 
 ## Autonomy (`goals/autonomous.py`)
 
 Every `AUTONOMOUS_INTERVAL_MIN` minutes, if no session is active and fatigue is not high:
 
-1. Abandon stale non-permanent goals.
+1. Abandon stale *bounded* goals.
 2. If independence score is low and no research goal exists, suggest research topics.
-3. Take one step on the highest-salience active goal.
+3. Take one step on the highest-salience active goal that is not over its `budget_share`.
 
-Routing:
-
-- `continuous_self_improvement` → `SelfTheorizer`
-- tag `research` → web search + EXTERNAL opinion, then complete
-- otherwise → an internal note stored as an episode
-
-Optional future simulation can modify or abandon the planned step.
+`select_action_type` is epsilon-greedy with forced exploration (`n < 2`). MID-tier actions (`web_research`, `self_theorize`, `future_simulate`) fall through when the background MID gate refuses.
 
 ## Research (`goals/research.py`)
 
 1. Generate 2–3 search queries, including a contrarian one.
-2. Run Tavily (counts against `SearchBudget`).
+2. Query local SearXNG and extract full pages (`trafilatura`).
 3. Synthesize a position.
 4. `form_opinion(..., origin=EXTERNAL)`.
 5. Store a research episode.
 
-This is how Keeper gets something to push back *from* that is not the user’s own view reflected back.
+This is how Keeper gets something to push back *from* that is not the user’s own view reflected back. There is no search quota — token spend is the constraint.
 
 ## Self-model (`core/self_model.py`)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +71,7 @@ class InternalState:
         self.curiosity: float = BASELINE["curiosity"]
         self.fatigue: float = BASELINE["fatigue"]
         self.drives = DriveSystem()
-        self.last_updated: datetime = datetime.utcnow()
+        self.last_updated: datetime = utcnow()
 
         self._recent_topics: list[str] = []
         self._messages_this_session: int = 0
@@ -84,12 +85,12 @@ class InternalState:
         delta = self._compute_delta(event)
         self._apply_delta(delta)
 
-        elapsed = (datetime.utcnow() - self.last_updated).total_seconds() / 60
+        elapsed = (utcnow() - self.last_updated).total_seconds() / 60
         if elapsed > 0:
             self._drift_toward_baseline(elapsed)
             self.drives.tick(elapsed)
 
-        self.last_updated = datetime.utcnow()
+        self.last_updated = utcnow()
         return delta
 
     def _compute_delta(self, event: Event) -> dict[str, float]:
@@ -278,8 +279,8 @@ class InternalState:
 
         last = data.get("last_updated")
         if last:
-            self.last_updated = datetime.fromisoformat(last)
-            elapsed = (datetime.utcnow() - self.last_updated).total_seconds() / 60
+            self.last_updated = parse_iso(last)
+            elapsed = (utcnow() - self.last_updated).total_seconds() / 60
             if elapsed > 1:
                 self._drift_toward_baseline(elapsed)
                 self.drives.tick(elapsed)

@@ -33,7 +33,7 @@ Startup uses a **single event loop**. python-telegram-bot's `post_init` / `post_
 Keeper-spec extras on the same singleton (`core/loop.py`):
 
 - `CodebaseIndex` — AST scan of this repo, used for self-reflection
-- `SearchBudget` / `APIBudget` — daily quotas that raise fatigue as they drain
+- `APIBudget` — daily OpenRouter spend (€10 ceiling) that raises fatigue as it drains; every LLM call is recorded
 - `UserLifeTracker` — user commitments and wellbeing, not chat engagement
 - `SelfTheorizer` — offline improvement proposals
 - `FutureSimulator` — gated “what if” before some autonomous actions
@@ -43,8 +43,8 @@ Keeper-spec extras on the same singleton (`core/loop.py`):
 
 1. Allowlist check. Typing indicator.
 2. `process()` marks the session active, estimates novelty/complexity, updates internal state, stores the turn in working + episodic memory, then builds a system prompt.
-3. The graph receives that prompt plus the working-memory transcript. `reason` may call tools (web search, memory read/write) and loops until it produces a reply.
-4. `post_process()` records the reply, API usage, a self-observation, opinion detection, and goal progress. Full state is snapshotted every 10 messages and on shutdown.
+3. The graph receives that prompt plus the working-memory transcript. `reason` may call tools (SearXNG web search, memory read/write, introspection) and loops until it produces a reply. Conversation tier degrades HIGH → MID → LOW as the daily budget fills; the conversation never hard-stops.
+4. `post_process()` records the reply, a self-observation, opinion detection, and bounded-goal completion checks. Spend is recorded per LLM call via `BudgetCallback`, not by a second token tally. Full state is snapshotted every 10 messages and on shutdown.
 
 `SOUL.md` is re-read every turn. Identity edits take effect without a restart.
 
@@ -63,11 +63,11 @@ Started in `ConsciousArchitecture.startup()`:
 | Loop | Default | Gate |
 |------|---------|------|
 | Environmental grounding | 30s wake | none |
-| Memory consolidation | 30 min | skipped while a session is active |
+| Memory consolidation | 30 min | skipped per-user while *that* user's session is active |
 | Self-model update | 60 min | needs ≥5 new self-observations |
 | Autonomous goal pursuit | 5 min | skipped while a session is active, or if fatigue is high |
 
-Intervals come from env (`CONSOLIDATION_INTERVAL_MIN`, etc.). Session end is driven by `TimeStream` silence timeout (`SESSION_TIMEOUT_MIN`, default 60). That timeout also clears the companion’s session flag so background work can resume.
+Intervals come from env (`CONSOLIDATION_INTERVAL_MIN`, etc.). Session end is driven by `TimeStream` silence timeout (`SESSION_TIMEOUT_MIN`, default 15). That timeout also clears the companion’s session flag so background work can resume.
 
 Autonomous actions stay **internal** (research, notes, self-theorizing). They do not message the user unprompted.
 

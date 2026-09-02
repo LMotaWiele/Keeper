@@ -5,6 +5,7 @@ import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ class Drive:
         """Something addressed this drive — reduce intensity."""
         reduction = amount if amount is not None else self.satisfaction_decay
         self.intensity = max(0.0, self.intensity - reduction)
-        self.last_satisfied = datetime.utcnow()
+        self.last_satisfied = utcnow()
 
     def frustrate(self, amount: float = 0.15) -> None:
         """This drive was actively blocked — spike intensity."""
@@ -62,7 +63,7 @@ class Drive:
             intensity=d.get("intensity", 0.0),
             buildup_rate=d.get("buildup_rate", 0.01),
             satisfaction_decay=d.get("satisfaction_decay", 0.3),
-            last_satisfied=datetime.fromisoformat(ls) if ls else None,
+            last_satisfied=parse_iso(ls) if ls else None,
             tags=d.get("tags", []),
         )
 
@@ -238,7 +239,7 @@ class DriveSystem:
                     drive.intensity = s.get("intensity", drive.intensity)
                     ls = s.get("last_satisfied")
                     if ls:
-                        drive.last_satisfied = datetime.fromisoformat(ls)
+                        drive.last_satisfied = parse_iso(ls)
 
         if "situational" in data:
             self.situational = [Drive.from_dict(d) for d in data["situational"]]

@@ -29,8 +29,9 @@ class MemorySystem:
         self.consolidator = consolidator_instance or consolidator
 
     async def init(self) -> None:
-        """Initialise persistent stores (SQLite schema, etc.)."""
+        """Initialise persistent stores (SQLite schema, embeddings warmup)."""
         await self.episodic.init()
+        await self.semantic.warmup()
 
     # ── Store ─────────────────────────────────────────────────────────────
 

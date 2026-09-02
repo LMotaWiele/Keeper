@@ -1,3 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+data/
+
 agent/__pycache__/__init__.cpython-313.pyc
 agent/__pycache__/graph.cpython-313.pyc
 agent/__pycache__/runner.cpython-313.pyc

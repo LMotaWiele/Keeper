@@ -6,14 +6,15 @@ import json
 import logging
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from config.settings import config
+from core.llm import get_llm
 
 log = logging.getLogger(__name__)
 
@@ -150,26 +151,19 @@ Output ONLY valid JSON.
 
 def _generate_id(domain: str, position: str) -> str:
     """Deterministic-ish ID from content."""
-    raw = f"{domain}:{position}:{datetime.utcnow().isoformat()}"
+    raw = f"{domain}:{position}:{utcnow().isoformat()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 def _utcnow_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return utcnow().isoformat()
 
 
 def _parse_json(raw: str) -> dict | None:
-    """Parse JSON from LLM output, handling markdown fences."""
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return None
+    """Parse JSON from LLM output, handling markdown fences and truncation."""
+    from core.json_utils import parse_json_lenient
+    parsed = parse_json_lenient(raw)
+    return parsed if isinstance(parsed, dict) else None
 
 
 # ── OpinionRegistry ───────────────────────────────────────────────────────
@@ -189,20 +183,8 @@ class OpinionRegistry:
 
     def __init__(self, memory: Any = None):
         self.memory = memory
-        self._llm: ChatAnthropic | None = None
         self.opinions: dict[str, Opinion] = {}
         self._user_known_positions: dict[str, str] = {}  # domain -> user's stance
-
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.3,  # lower temp for analytical tasks
-                max_tokens=1024,
-            )
-        return self._llm
 
     # ── Opinion formation ─────────────────────────────────────────────────
 
@@ -231,7 +213,9 @@ class OpinionRegistry:
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            result = await get_llm("opinion_detection").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
             parsed = _parse_json(result.content)
             if not parsed:
                 return []
@@ -451,7 +435,9 @@ class OpinionRegistry:
             )
 
             try:
-                result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+                result = await get_llm("opinion_review").ainvoke(
+                    [HumanMessage(content=prompt)]
+                )
                 parsed = _parse_json(result.content)
                 if not parsed:
                     continue

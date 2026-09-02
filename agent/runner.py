@@ -62,6 +62,7 @@ async def run_agent(user_id: int, user_text: str) -> str:
         "tool_calls_pending": False,
         "response_text": "",
         "tool_calls_made": 0,
+        "tier": companion.conversation_tier().value,
     }
 
     result = await companion_graph.ainvoke(initial_state)

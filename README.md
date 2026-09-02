@@ -35,31 +35,58 @@ Telegram (allowlisted)
 
 | Pillar | What it does |
 |--------|----------------|
-| **Memory** | Working window (salience eviction), episodic SQLite with decay, semantic Chroma patterns |
+| **Memory** | Working window (salience eviction), episodic SQLite with decay, semantic Chroma + local fastembed |
 | **Internal state** | Affect vector + drives, event-driven, persisted across restarts |
 | **Environment** | Time passing, session rhythm, optional RSS, system health |
-| **Goals** | Terminal orientations + instrumental goals + idle autonomous pursuit |
+| **Goals** | Terminal orientations + bounded/unbounded instrumental goals + idle autonomous pursuit |
 | **Self-model** | Identity learned from observed behavior; opinion registry against mirroring |
 
-Design reasoning, memory details, and goal/self-model notes: [`docs/`](docs/).
+All LLM traffic goes through OpenRouter (`core/llm.py`) with three cost tiers and spend recorded on every call. Daily ceiling: €10. Design reasoning, memory details, and goal/self-model notes: [`docs/`](docs/).
 
 ## Stack
 
-Python 3.11+ · LangGraph · Claude · ChromaDB · SQLite · Tavily · python-telegram-bot
+Python 3.11+ · LangGraph · OpenRouter (`ChatOpenAI`) · ChromaDB · SQLite · SearXNG · fastembed · python-telegram-bot
+
+## Prerequisites
+
+1. **OpenRouter API key** (`OPENROUTER_API_KEY`). All chat models are reached through `https://openrouter.ai/api/v1`. Defaults: `MODEL_HIGH=x-ai/grok-4.6`, `MODEL_MID=google/gemini-3.7-flash`, `MODEL_LOW=deepseek/deepseek-v4-flash-0731`.
+2. **Telegram bot token** and your user id (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`).
+3. **A local SearXNG instance** for web search. Default query URL: `http://localhost:8081/search?q=<query>`.
+
+   SearXNG must accept JSON and must not rate-limit local callers. In its `settings.yml`:
+
+   ```yaml
+   search:
+     formats:
+       - html
+       - json
+   server:
+     limiter: false
+   ```
+
+   Without `json` in `search.formats` every request returns HTML. With the limiter on, local burst traffic gets 429s and search silently degrades.
+
+4. **Local embeddings** via `fastembed` (`BAAI/bge-small-en-v1.5` by default). First run downloads ~130 MB into `data/fastembed`.
+
+No Anthropic, Tavily, or OpenAI keys are required.
 
 ## Quick start
-
-**You need:** a [Telegram bot token](https://t.me/BotFather), your Telegram user id, an Anthropic API key, a Tavily key, and an OpenAI key (embeddings only).
 
 ```bash
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env              # then fill in keys
+cp .env.example .env              # then fill in OPENROUTER_API_KEY and Telegram
 python main.py
 ```
 
-First run creates `./data/` (SQLite, Chroma, JSON state).
+Wipe stored state (no migration — all data is disposable):
+
+```bash
+python main.py --reset
+```
+
+First run creates `./data/` (SQLite, Chroma, JSON state, embedding cache).
 
 ### Telegram
 
@@ -67,8 +94,9 @@ First run creates `./data/` (SQLite, Chroma, JSON state).
 |---------|----------------|
 | `/start` | Wake the companion |
 | `/memory` | Show episodic memory |
-| `/status` | Affect, drives, goals, self-model version |
-| `/goals` | Active instrumental goals |
+| `/status` | Affect, drives, goals, self-model version, API spend by task |
+| `/goals` | Active goals (ceilings for unbounded, done-when for bounded) |
+| `/actions` | Elo tables for unbounded-goal action types |
 | `/clear` | Wipe the working-memory window |
 
 Everyone else is silently ignored (`TELEGRAM_ALLOWED_USER_IDS`).
@@ -90,12 +118,12 @@ Keeper/
 ├── SOUL.md                 identity prompt (edit freely)
 ├── main.py                 process entry
 ├── agent/                  LangGraph + runner
-├── core/                   orchestrator, state, self-model, opinions
+├── core/                   orchestrator, state, self-model, opinions, LLM factory
 ├── memory/                 working / episodic / semantic / consolidator
 ├── environment/            time, streams, future simulation
-├── goals/                  goals, autonomy, research, self-theorizing
+├── goals/                  goals, autonomy, research, self-theorizing, ratings
 ├── tg/                     Telegram bot
-├── tools/                  web search + memory tools
+├── tools/                  web search, memory, introspection
 └── docs/                   architecture and design notes
 ```
 

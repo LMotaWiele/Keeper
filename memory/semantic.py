@@ -1,16 +1,22 @@
 """Semantic memory — Chroma patterns, not transcripts. Same text reinforces instead of duplicating."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import logging
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
 
 import chromadb
 from chromadb.config import Settings
-from langchain_openai import OpenAIEmbeddings
+from fastembed import TextEmbedding
 
 from config.settings import config
+
+log = logging.getLogger(__name__)
 
 
 def _content_id(content: str) -> str:
@@ -30,7 +36,8 @@ class SemanticMemory:
     def __init__(self, db_path: Path | None = None):
         self.db_path = str(db_path or config.chroma_db_path)
         self._client: chromadb.PersistentClient | None = None
-        self._embeddings: OpenAIEmbeddings | None = None
+        self._embeddings: TextEmbedding | None = None
+        self._embedding_dim: int | None = None
 
     # ── Internals ─────────────────────────────────────────────────────────
 
@@ -42,18 +49,34 @@ class SemanticMemory:
             )
         return self._client
 
-    def _get_embeddings(self) -> OpenAIEmbeddings:
+    def _get_embeddings(self) -> TextEmbedding:
         if self._embeddings is None:
-            self._embeddings = OpenAIEmbeddings(
-                model=config.embedding_model,
-                openai_api_key=config.openai_api_key,
+            self._embeddings = TextEmbedding(
+                model_name=config.embedding_model,
+                cache_dir=str(config.embedding_cache_dir),
             )
         return self._embeddings
 
+    async def _embed(self, text: str) -> list[float]:
+        def _run() -> list[float]:
+            raw = next(iter(self._get_embeddings().embed([text])))
+            return [float(x) for x in raw]
+        return await asyncio.to_thread(_run)
+
     def _collection(self, user_id: int) -> chromadb.Collection:
         return self._get_client().get_or_create_collection(
-            name=f"semantic_user_{user_id}",
+            name=f"semantic_v2_user_{user_id}",
             metadata={"hnsw:space": "cosine"},
+        )
+
+    async def warmup(self) -> None:
+        """Download/load the embedding model so the first user turn is not stalled."""
+        vec = await self._embed("warmup")
+        self._embedding_dim = len(vec)
+        log.info(
+            "Embeddings ready — dim=%d model=%s",
+            self._embedding_dim,
+            config.embedding_model,
         )
 
     # ── Store ─────────────────────────────────────────────────────────────
@@ -85,8 +108,10 @@ class SemanticMemory:
             old_confidence = old_meta.get("confidence", 0.5)
             old_sources = old_meta.get("source_episode_ids", [])
             if isinstance(old_sources, str):
-                import json
-                old_sources = json.loads(old_sources)
+                try:
+                    old_sources = json.loads(old_sources)
+                except json.JSONDecodeError:
+                    old_sources = []
 
             new_confidence = min(1.0, old_confidence + 0.1)
             merged_sources = list(set(old_sources + (source_episode_ids or [])))
@@ -97,20 +122,21 @@ class SemanticMemory:
                     **old_meta,
                     "confidence": new_confidence,
                     "source_episode_ids": str(merged_sources),
-                    "reinforced_at": datetime.utcnow().isoformat(),
+                    "reinforced_at": utcnow().isoformat(),
                     "reinforcement_count": old_meta.get("reinforcement_count", 0) + 1,
+                    "invalidated": "false",
                 }],
             )
             return doc_id
 
         # New pattern — embed and store
-        embedding = self._get_embeddings().embed_query(content)
+        embedding = await self._embed(content)
         col.upsert(
             ids=[doc_id],
             embeddings=[embedding],
             documents=[content],
             metadatas=[{
-                "stored_at": datetime.utcnow().isoformat(),
+                "stored_at": utcnow().isoformat(),
                 "pattern_type": pattern_type,
                 "confidence": confidence,
                 "source_episode_ids": str(source_episode_ids or []),
@@ -142,7 +168,7 @@ class SemanticMemory:
         # Build where filter
         where_filter = where or {}
 
-        embedding = self._get_embeddings().embed_query(query)
+        embedding = await self._embed(query)
         results = col.query(
             query_embeddings=[embedding],
             n_results=min(n_results * 2, col.count()),  # over-fetch to filter
@@ -163,10 +189,12 @@ class SemanticMemory:
                 continue
 
             memories.append({
+                "id": _content_id(doc),
                 "content": doc,
                 "metadata": meta,
                 "confidence": confidence,
                 "relevance": round(1 - dist, 3),
+                "stored_at": meta.get("stored_at", ""),
             })
 
         # Sort by combined relevance + confidence score
@@ -175,6 +203,35 @@ class SemanticMemory:
             reverse=True,
         )
         return memories[:n_results]
+
+    async def list_review_candidates(
+        self,
+        user_id: int,
+        max_confidence: float = 0.4,
+    ) -> list[dict]:
+        """Invalidated or low-confidence patterns for consolidation_review."""
+        col = self._collection(user_id)
+        if col.count() == 0:
+            return []
+        results = col.get(include=["documents", "metadatas"])
+        out = []
+        for doc_id, doc, meta in zip(
+            results.get("ids") or [],
+            results.get("documents") or [],
+            results.get("metadatas") or [],
+        ):
+            confidence = meta.get("confidence", 0.5)
+            invalidated = meta.get("invalidated", "false") == "true"
+            if invalidated or confidence < max_confidence:
+                out.append({
+                    "id": doc_id,
+                    "content": doc,
+                    "metadata": meta,
+                    "confidence": confidence,
+                    "invalidated": invalidated,
+                    "stored_at": meta.get("stored_at", ""),
+                })
+        return out
 
     # ── Invalidation ──────────────────────────────────────────────────────
 
@@ -189,7 +246,7 @@ class SemanticMemory:
         if existing and existing["ids"]:
             meta = existing["metadatas"][0]
             meta["invalidated"] = "true"
-            meta["invalidated_at"] = datetime.utcnow().isoformat()
+            meta["invalidated_at"] = utcnow().isoformat()
             meta["invalidation_reason"] = reason
             col.update(ids=[doc_id], metadatas=[meta])
 
@@ -216,7 +273,6 @@ class SemanticMemory:
 
         lines = ["## Things I've learned (semantic memory)"]
         for mem in memories:
-            rel = mem["relevance"]
             conf = mem["confidence"]
             ptype = mem["metadata"].get("pattern_type", "general")
             lines.append(f"- ({ptype}, confidence {conf:.1f}) {mem['content']}")

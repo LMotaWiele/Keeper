@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import datetime, timedelta
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any, Literal
 
@@ -66,7 +67,7 @@ ALTER TABLE episodes ADD COLUMN associations        TEXT DEFAULT '[]';
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return utcnow().isoformat()
 
 
 class EpisodicMemory:
@@ -246,7 +247,7 @@ class EpisodicMemory:
         limit: int = 50,
     ) -> list[dict]:
         """Get recent high-strength episodes for the consolidator."""
-        cutoff = (datetime.utcnow() - timedelta(hours=since_hours)).isoformat()
+        cutoff = (utcnow() - timedelta(hours=since_hours)).isoformat()
         query = """
             SELECT * FROM episodes
             WHERE user_id = ?
@@ -275,7 +276,7 @@ class EpisodicMemory:
 
         Returns the number of episodes updated.
         """
-        now = datetime.utcnow()
+        now = utcnow()
 
         where = "WHERE 1=1"
         params: list[Any] = []
@@ -291,7 +292,7 @@ class EpisodicMemory:
             updated = 0
             for row in rows:
                 ep = dict(row)
-                created = datetime.fromisoformat(ep["created_at"])
+                created = parse_iso(ep["created_at"])
                 hours_elapsed = max((now - created).total_seconds() / 3600, 0.01)
 
                 base = ep["importance"] * (1.0 + ep.get("emotional_weight", 0.5))

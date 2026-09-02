@@ -6,6 +6,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +30,8 @@ class SessionRecord:
     @classmethod
     def from_dict(cls, d: dict) -> SessionRecord:
         return cls(
-            started_at=datetime.fromisoformat(d["started_at"]),
-            ended_at=datetime.fromisoformat(d["ended_at"]) if d.get("ended_at") else None,
+            started_at=parse_iso(d["started_at"]),
+            ended_at=parse_iso(d["ended_at"]) if d.get("ended_at") else None,
             message_count=d.get("message_count", 0),
             duration_minutes=d.get("duration_minutes", 0.0),
         )
@@ -45,7 +46,7 @@ class TemporalLandmark:
 
     @property
     def age_hours(self) -> float:
-        return (datetime.utcnow() - self.timestamp).total_seconds() / 3600
+        return (utcnow() - self.timestamp).total_seconds() / 3600
 
     @property
     def age_description(self) -> str:
@@ -70,7 +71,7 @@ class TemporalLandmark:
     def from_dict(cls, d: dict) -> TemporalLandmark:
         return cls(
             description=d["description"],
-            timestamp=datetime.fromisoformat(d["timestamp"]),
+            timestamp=parse_iso(d["timestamp"]),
             tags=d.get("tags", []),
         )
 
@@ -99,7 +100,7 @@ class TimeSense:
 
     def start_session(self) -> None:
         """Mark the beginning of a new interaction session."""
-        now = datetime.utcnow()
+        now = utcnow()
         self._current_session = SessionRecord(started_at=now)
         if self._first_interaction is None:
             self._first_interaction = now
@@ -109,7 +110,7 @@ class TimeSense:
         if self._current_session is None:
             return
 
-        now = datetime.utcnow()
+        now = utcnow()
         self._current_session.ended_at = now
         self._current_session.message_count = message_count
         self._current_session.duration_minutes = (
@@ -120,7 +121,7 @@ class TimeSense:
 
     def record_message(self) -> None:
         """Record a message timestamp for tempo tracking."""
-        self._message_times.append(datetime.utcnow())
+        self._message_times.append(utcnow())
         if self._current_session:
             self._current_session.message_count += 1
 
@@ -130,13 +131,13 @@ class TimeSense:
         """Pin a notable event to the current moment."""
         self.landmarks.append(TemporalLandmark(
             description=description,
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             tags=tags or [],
         ))
 
     def recent_landmarks(self, hours: float = 48, tags: list[str] | None = None) -> list[TemporalLandmark]:
         """Get landmarks from the last N hours, optionally filtered by tags."""
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        cutoff = utcnow() - timedelta(hours=hours)
         results = [lm for lm in self.landmarks if lm.timestamp > cutoff]
         if tags:
             results = [lm for lm in results if any(t in lm.tags for t in tags)]
@@ -213,14 +214,14 @@ class TimeSense:
             return None
         last = self.sessions[-1]
         ref = last.ended_at or last.started_at
-        return (datetime.utcnow() - ref).total_seconds() / 3600
+        return (utcnow() - ref).total_seconds() / 3600
 
     @property
     def relationship_age_days(self) -> float | None:
         """How long since the very first interaction."""
         if self._first_interaction is None:
             return None
-        return (datetime.utcnow() - self._first_interaction).total_seconds() / 86400
+        return (utcnow() - self._first_interaction).total_seconds() / 86400
 
     @property
     def subjective_time_since_last(self) -> str:
@@ -270,7 +271,7 @@ class TimeSense:
         parts = []
 
         # Time of day
-        now = datetime.utcnow()
+        now = utcnow()
         parts.append(f"It's {now.strftime('%A')} {now.strftime('%H:%M')} UTC, {self._time_of_day()}")
 
         # Session gap
@@ -280,7 +281,7 @@ class TimeSense:
 
         # Current session duration
         if self._current_session:
-            dur = (datetime.utcnow() - self._current_session.started_at).total_seconds() / 60
+            dur = (utcnow() - self._current_session.started_at).total_seconds() / 60
             msg_count = self._current_session.message_count
             if dur > 5:
                 parts.append(f"This session: {dur:.0f}m, {msg_count} messages ({self.conversation_tempo} pace)")
@@ -299,7 +300,7 @@ class TimeSense:
         return " | ".join(parts)
 
     def _time_of_day(self) -> str:
-        hour = datetime.utcnow().hour
+        hour = utcnow().hour
         if hour < 6:
             return "late night"
         elif hour < 12:
@@ -332,7 +333,7 @@ class TimeSense:
                 maxlen=100,
             )
         if data.get("first_interaction"):
-            self._first_interaction = datetime.fromisoformat(data["first_interaction"])
+            self._first_interaction = parse_iso(data["first_interaction"])
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -41,7 +41,7 @@ Types: `summary`, `fact`, `event`, `preference`, `note`, `self_observation`, `op
 
 ## Semantic (`memory/semantic.py`)
 
-ChromaDB + OpenAI embeddings, one collection per user. Documents are **patterns**, not transcripts.
+ChromaDB + local `fastembed` embeddings (`BAAI/bge-small-en-v1.5`, 384-d), collection `semantic_v2_user_{id}` so old 1536-d directories cannot collide. Documents are **patterns**, not transcripts. Embedding runs in a worker thread so Telegram polling is not blocked.
 
 Same text hashes to the same id. A repeat **reinforces** (confidence +0.1, merged source episode ids) instead of duplicating. Contradictions `invalidate()` a pattern; cleanup can delete invalidated rows later.
 
@@ -51,12 +51,12 @@ Search over-fetches, drops invalidated/low-confidence hits, then ranks `0.6 * re
 
 Offline job, not a per-reply graph node.
 
-1. If fewer than 3 new episodes since last run: decay + forget only (no LLM).
+1. If fewer than 1 new episode since last run, unless it has been >6 hours: decay + forget only (no LLM).
 2. Else: LLM extracts traits / preferences / relationships / knowledge / behavioral patterns / contradictions.
 3. New patterns are checked against existing semantic hits. `keep_new` invalidates the old one.
 4. Decay + forget. Reset the “new since consolidation” counter.
 
-The loop skips entirely while any user session is active.
+The loop skips **that user** while their session is active. Background LLM work is also skipped when `APIBudget.allows(LOW, background=True)` is false; decay still runs. `run_cycle` reports `reason`: `ran` / `skipped_no_new` / `skipped_budget`.
 
 ## Tools
 

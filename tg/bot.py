@@ -93,6 +93,31 @@ async def status_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         bar = "█" * int(intensity * 10) + "░" * (10 - int(intensity * 10))
         lines.append(f"  {name}: {bar} {intensity:.2f}")
 
+    budget = status.get("api_budget") or {}
+    lines.append("")
+    lines.append(
+        f"API budget: €{budget.get('spent_today_eur', 0):.4f} spent, "
+        f"€{budget.get('remaining_eur', 0):.2f} remaining "
+        f"({budget.get('fraction_used', 0):.0%})"
+    )
+    lines.append(
+        f"Calls today: {budget.get('calls_today', 0)}  "
+        f"tier: {budget.get('conversation_tier', '?')}"
+    )
+    spend_by_task = budget.get("spend_by_task") or {}
+    if spend_by_task:
+        lines.append("Spend by task:")
+        for task, amt in sorted(spend_by_task.items(), key=lambda x: -x[1]):
+            lines.append(f"  {task}: €{amt:.4f}")
+
+    health = status.get("search_health") or {}
+    if health:
+        lines.append(
+            f"Search: {health.get('queries', 0)} queries, "
+            f"{health.get('zero_result_queries', 0)} empty, "
+            f"{health.get('fetch_failure_rate', 0):.0%} fetch failures"
+        )
+
     await _reply(update, "\n".join(lines))
 
 
@@ -110,14 +135,54 @@ async def goals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
     lines = ["Active goals", ""]
     for g in sorted(active, key=lambda g: g.salience, reverse=True):
-        progress = f"{g.progress:.0%}"
         parent = f" -> {g.parent_goal}" if g.parent_goal else ""
-        lines.append(f"{g.name}{parent} [{progress}]")
-        lines.append(f"  {g.description}")
+        if g.is_unbounded:
+            lines.append(f"{g.name}{parent} (ongoing)")
+            lines.append(f"  toward: {g.ceiling_description or g.description}")
+            rated = [
+                (t, info) for t, info in (g.action_ratings or {}).items()
+                if int(info.get("n") or 0) >= 3
+            ]
+            if rated:
+                rated.sort(key=lambda kv: -float(kv[1].get("elo") or 0))
+                bits = [f"{t} ({info['elo']:.0f}, n={info['n']})" for t, info in rated[:4]]
+                lines.append(f"  most effective: {', '.join(bits)}")
+        else:
+            done_when = ""
+            if g.completion_condition:
+                done_when = g.completion_condition.get("description") or g.description
+            lines.append(f"{g.name}{parent}")
+            lines.append(f"  done when: {done_when}")
         if g.progress_notes:
             lines.append(f"  Last: {g.progress_notes[-1]}")
         lines.append("")
 
+    await _reply(update, "\n".join(lines))
+
+
+async def actions_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show Elo tables for unbounded goals."""
+    if not allowed(update):
+        return
+    unbounded = [g for g in companion.goals.active_instrumental if g.is_unbounded]
+    if not unbounded:
+        await update.message.reply_text("No unbounded goals yet.")
+        return
+    lines = ["Action ratings", ""]
+    for g in unbounded:
+        lines.append(g.name)
+        ratings = g.action_ratings or {}
+        if not ratings:
+            lines.append("  (no rated actions yet)")
+        else:
+            for atype, info in sorted(
+                ratings.items(), key=lambda kv: -float(kv[1].get("elo") or 0)
+            ):
+                lines.append(
+                    f"  {atype}: elo={info.get('elo', 0):.0f}  "
+                    f"n={info.get('n', 0)}  spend=${info.get('spend_usd', 0):.4f}"
+                )
+        lines.append("")
     await _reply(update, "\n".join(lines))
 
 
@@ -156,6 +221,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("memory", memory_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("goals", goals_cmd))
+    app.add_handler(CommandHandler("actions", actions_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     return app

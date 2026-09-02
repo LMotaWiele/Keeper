@@ -5,25 +5,17 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from typing import Callable
 
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
-from config.settings import config
-from memory.episodic import episodic, EpisodeType
+from core.json_utils import parse_json_lenient
+from core.llm import Tier, get_llm
+from memory.episodic import episodic
 from memory.semantic import semantic
 
 log = logging.getLogger(__name__)
-
-
-def _strip_fences(text: str) -> str:
-    """Strip markdown code fences that LLMs sometimes wrap JSON in."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]  # drop opening fence line
-        text = text.rsplit("```", 1)[0]  # drop closing fence
-    return text.strip()
 
 
 PATTERN_EXTRACTION_PROMPT = """\
@@ -86,20 +78,9 @@ class MemoryConsolidator:
     """
 
     def __init__(self):
-        self._llm = None
         self._running = False
         self._last_run: dict[int, datetime] = {}
-
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.3,
-                max_tokens=2048,
-            )
-        return self._llm
+        self.last_result: dict[int, dict] = {}
 
     # ── Main cycle ────────────────────────────────────────────────────────
 
@@ -117,19 +98,32 @@ class MemoryConsolidator:
             "episodes_forgotten": 0,
             "contradictions_found": 0,
             "skipped": False,
+            "reason": "ran",
         }
 
         try:
+            from core.loop import companion
+            if not companion.api_budget.allows(Tier.LOW, background=True):
+                log.debug("Consolidation LLM skipped — background LOW budget gate")
+                result["skipped"] = True
+                result["reason"] = "skipped_budget"
+                result["episodes_decayed"] = await episodic.apply_decay(user_id)
+                result["episodes_forgotten"] = await episodic.forget(user_id)
+                return result
+
             new_count = episodic.new_episodes_since_consolidation(user_id)
             tracked = user_id in episodic._new_since_consolidation
+            last = self._last_run.get(user_id)
+            stale = last is None or (utcnow() - last).total_seconds() > 6 * 3600
             # Skip LLM extract only when we have a live counter and it is still small.
             # After restart the counter is empty — still consolidate leftover episodes.
-            if tracked and new_count < 3:
+            if tracked and new_count < 1 and not stale:
                 log.debug(
                     "Skipping consolidation for user %s: only %d new episodes",
                     user_id, new_count,
                 )
                 result["skipped"] = True
+                result["reason"] = "skipped_no_new"
                 # Still apply decay/forgetting (cheap, no LLM call)
                 result["episodes_decayed"] = await episodic.apply_decay(user_id)
                 result["episodes_forgotten"] = await episodic.forget(user_id)
@@ -174,13 +168,16 @@ class MemoryConsolidator:
             # 6. Forget very weak memories
             result["episodes_forgotten"] = await episodic.forget(user_id)
 
-            self._last_run[user_id] = datetime.utcnow()
+            self._last_run[user_id] = utcnow()
 
             # Mark episodes as consolidated
-            episodic.mark_consolidated(user_id)            
+            episodic.mark_consolidated(user_id)
 
         except Exception:
             log.exception("Consolidation cycle failed for user %s", user_id)
+            result["reason"] = "error"
+        finally:
+            self.last_result[user_id] = dict(result)
 
         return result
 
@@ -196,14 +193,14 @@ class MemoryConsolidator:
         prompt = PATTERN_EXTRACTION_PROMPT + episode_text
 
         try:
-            response = await self.llm.ainvoke([
+            response = await get_llm("pattern_extraction", json_mode=True).ainvoke([
                 HumanMessage(content=prompt),
             ])
-            patterns = json.loads(_strip_fences(response.content))
+            patterns = parse_json_lenient(response.content)
             if not isinstance(patterns, list):
                 return []
             return patterns
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             log.warning("Pattern extraction failed: %s", e)
             return []
 
@@ -245,10 +242,10 @@ class MemoryConsolidator:
         )
 
         try:
-            response = await self.llm.ainvoke([
+            response = await get_llm("contradiction_check", json_mode=True).ainvoke([
                 HumanMessage(content=prompt),
             ])
-            contradictions = json.loads(_strip_fences(response.content))
+            contradictions = parse_json_lenient(response.content)
             if not isinstance(contradictions, list):
                 return []
 
@@ -267,7 +264,7 @@ class MemoryConsolidator:
                             break
 
             return contradictions
-        except (json.JSONDecodeError, Exception) as e:
+        except Exception as e:
             log.warning("Contradiction check failed: %s", e)
             return []
 
@@ -277,9 +274,9 @@ class MemoryConsolidator:
         self,
         user_ids: list[int],
         interval_minutes: int = 30,
-        session_check: Callable[[], bool] | None = None,
+        session_check: Callable[[int], bool] | None = None,
     ) -> None:
-        """Periodic consolidation. `session_check` defers work during live conversation."""
+        """Periodic consolidation. `session_check(user_id)` defers that user during a live session."""
         self._running = True
         log.info(
             "Consolidation loop started (interval=%dm, users=%s)",
@@ -287,21 +284,20 @@ class MemoryConsolidator:
         )
 
         while self._running:
-            if session_check and session_check():
-                log.debug("Consolidation deferred — active session detected")
-                await asyncio.sleep(interval_minutes * 60)
-                continue
-
             for uid in user_ids:
+                if session_check and session_check(uid):
+                    log.debug("Consolidation deferred for user %s — active session", uid)
+                    continue
                 # Skip if we ran recently
                 last = self._last_run.get(uid)
                 if last:
-                    elapsed = (datetime.utcnow() - last).total_seconds() / 60
+                    elapsed = (utcnow() - last).total_seconds() / 60
                     if elapsed < interval_minutes * 0.8:
                         continue
 
                 result = await self.run_cycle(uid)
-                if any(v > 0 for v in result.values()):
+                numeric = [v for v in result.values() if isinstance(v, (int, float)) and v > 0]
+                if numeric or result.get("reason") == "ran":
                     log.info("Consolidation for user %s: %s", uid, result)
 
             await asyncio.sleep(interval_minutes * 60)

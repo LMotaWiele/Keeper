@@ -58,7 +58,7 @@ async def run_tests():
     print("✓ Empty results handled gracefully")
 
     # ── String results handling ───────────────────────────────────────
-    string_results = ["This is a plain text result from Tavily"]
+    string_results = ["This is a plain text result from SearXNG"]
     str_formatted = ResearchEngine._format_search_results(string_results)
     assert "plain text result" in str_formatted
     print("✓ String-type results handled")
@@ -117,7 +117,7 @@ async def run_tests():
     print("=" * 50)
     print()
     print("Note: Live web search + LLM integration tests require")
-    print("running the companion with TAVILY_API_KEY configured.")
+    print("running the companion with SearXNG at SEARXNG_QUERY_URL.")
 
 
 if __name__ == "__main__":

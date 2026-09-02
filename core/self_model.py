@@ -5,14 +5,14 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
 from config.settings import config
-
+from core.llm import Tier, get_llm
 from core.opinions import OpinionRegistry
 
 log = logging.getLogger(__name__)
@@ -235,7 +235,6 @@ class SelfModel:
     def __init__(self, memory_system: Any = None, codebase: Any = None):
         self.memory = memory_system
         self.codebase = codebase  # CodebaseIndex, optional
-        self._llm: ChatAnthropic | None = None
         self._running = False
 
         self.model: dict = {
@@ -271,17 +270,6 @@ class SelfModel:
 
         # Recursion guard — prevents semantic collapse
         self.recursion_guard = RecursionGuard()
-
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.4,
-                max_tokens=2048,
-            )
-        return self._llm
 
     # ── Observation (runs after every response) ───────────────────────────
 
@@ -350,7 +338,9 @@ class SelfModel:
             response=response[:800],
         )
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
+            result = await get_llm("observation_summary").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
             return result.content.strip()
         except Exception as e:
             log.warning("Observation summary failed: %s", e)
@@ -426,18 +416,17 @@ class SelfModel:
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-                if raw.endswith("```"):
-                    raw = raw[:-3]
-                raw = raw.strip()
-
-            updated = json.loads(raw)
+            from core.json_utils import parse_json_lenient
+            result = await get_llm("self_model_analysis", json_mode=True).ainvoke(
+                [HumanMessage(content=prompt)]
+            )
+            updated = parse_json_lenient(result.content)
+            if not isinstance(updated, dict):
+                log.warning("Self-model update failed to parse")
+                return False
 
             self.model.update(updated)
-            self.model["last_updated"] = datetime.utcnow().isoformat()
+            self.model["last_updated"] = utcnow().isoformat()
             self.model["model_version"] = self.model.get("model_version", 0) + 1
             self.model["observations_analysed"] = len(observations)
 
@@ -459,8 +448,6 @@ class SelfModel:
             )
             return True
 
-        except json.JSONDecodeError as e:
-            log.warning("Self-model update failed to parse: %s", e)
         except Exception as e:
             log.exception("Self-model update failed: %s", e)
         return False
@@ -493,11 +480,13 @@ class SelfModel:
             self_model=json.dumps(self.model, indent=2, default=str)
         )
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            review = json.loads(raw)
+            from core.json_utils import parse_json_lenient
+            result = await get_llm("contrarian_review").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
+            review = parse_json_lenient(result.content)
+            if not isinstance(review, dict):
+                return
 
             for update in review.get("suggested_model_updates", []):
                 self.model.setdefault("pending_revisions", []).append(update)
@@ -533,21 +522,28 @@ class SelfModel:
             return []
 
         obs_text = "\n".join(f"- {o['content']}" for o in observations)
-        model_text = json.dumps(self.model, indent=2, default=str)
+        pruned = {
+            k: v for k, v in self.model.items()
+            if k not in ("hypotheses", "consistency_flags")
+        }
+        pruned["growth_trajectory"] = list(pruned.get("growth_trajectory") or [])[-4:]
+        model_text = json.dumps(pruned, indent=2, default=str)
 
         prompt = HYPOTHESIS_PROMPT.format(
             self_model=model_text, observations=obs_text
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            hypotheses = json.loads(raw)
+            from core.json_utils import parse_json_lenient
+            result = await get_llm("hypothesis_generation", json_mode=True).ainvoke(
+                [HumanMessage(content=prompt)]
+            )
+            hypotheses = parse_json_lenient(result.content)
+            if not isinstance(hypotheses, list):
+                return []
 
             for h in hypotheses:
-                h["generated_at"] = datetime.utcnow().isoformat()
+                h["generated_at"] = utcnow().isoformat()
                 h["tested"] = False
 
             self.model["hypotheses"] = hypotheses
@@ -563,11 +559,12 @@ class SelfModel:
         Injected into every LLM call alongside internal state.
         """
         if self.model.get("model_version", 0) == 0:
-            return (
-                "## Self-model\n"
-                "No behavioral observations yet. Be yourself — "
-                "the self-model will form from what you actually do."
-            )
+            parts = ["## Self-model\nNo behavioral observations yet. Be yourself — "
+                     "the self-model will form from what you actually do."]
+            opinion_ctx = self.opinions.to_prompt_context()
+            if opinion_ctx:
+                parts.append(opinion_ctx)
+            return "\n\n".join(parts)
 
         parts = [
             "## Self-model (derived from observed behavior, not assumed)",
@@ -638,12 +635,17 @@ class SelfModel:
         log.info("Self-model loop started (interval=%dm)", interval_minutes)
 
         while self._running:
-            for uid in user_ids:
-                obs_count = self.model.get("observation_count", 0)
-                last_analysed = self.model.get("observations_analysed", 0)
+            from core.loop import companion
+            mid_ok = companion.api_budget.allows(Tier.MID, background=True)
+            if mid_ok:
+                for uid in user_ids:
+                    obs_count = self.model.get("observation_count", 0)
+                    last_analysed = self.model.get("observations_analysed", 0)
 
-                if obs_count - last_analysed >= 5:
-                    await self.update_model(uid)
+                    if obs_count - last_analysed >= 5:
+                        await self.update_model(uid)
+            else:
+                log.debug("Self-model update skipped — background MID budget gate")
 
             await asyncio.sleep(interval_minutes * 60)
 
@@ -656,8 +658,9 @@ class SelfModel:
                 self._loop_count = 0
 
             if self._loop_count % review_every == 0 and self.opinions.opinions:
-                for uid in user_ids:
-                    await self.opinions.review_opinions(uid)
+                if companion.api_budget.allows(Tier.LOW, background=True):
+                    for uid in user_ids:
+                        await self.opinions.review_opinions(uid)
 
     def stop(self) -> None:
         self._running = False

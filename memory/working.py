@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Literal
 
@@ -20,7 +21,7 @@ class WorkingItem:
     role: MessageRole
     content: str
     salience: float = 0.5              # 0–1, drives eviction priority
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=utcnow)
     metadata: dict = field(default_factory=dict)
 
     def __lt__(self, other: WorkingItem) -> bool:
@@ -172,7 +173,7 @@ class WorkingMemory:
                         role=item_data["role"],
                         content=item_data["content"],
                         salience=item_data.get("salience", 0.5),
-                        timestamp=datetime.fromisoformat(item_data["timestamp"]),
+                        timestamp=parse_iso(item_data["timestamp"]),
                         metadata=item_data.get("metadata", {}),
                     )
                     self._buf(user_id).append(wi)
@@ -192,7 +193,7 @@ class WorkingMemory:
         if not buf:
             return False
         latest = max(item.timestamp for item in buf)
-        elapsed = (datetime.utcnow() - latest).total_seconds() / 60
+        elapsed = (utcnow() - latest).total_seconds() / 60
         return elapsed < minutes
 
     # ── Export ────────────────────────────────────────────────────────────

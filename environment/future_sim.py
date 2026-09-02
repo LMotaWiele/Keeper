@@ -1,14 +1,12 @@
 """Future simulation — gated 'what if' before high-stakes autonomous actions."""
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from config.settings import config
+from core.llm import get_llm
 
 log = logging.getLogger(__name__)
 
@@ -65,18 +63,7 @@ class FutureSimulator:
     IMPORTANCE_THRESHOLD = 0.6
 
     def __init__(self):
-        self._llm: ChatAnthropic | None = None
-
-    @property
-    def llm(self) -> ChatAnthropic:
-        if self._llm is None:
-            self._llm = ChatAnthropic(
-                model=config.llm_model,
-                anthropic_api_key=config.anthropic_api_key,
-                temperature=0.5,
-                max_tokens=1500,
-            )
-        return self._llm
+        pass
 
     async def should_simulate(
         self, action_description: str, internal_state: Any
@@ -117,11 +104,12 @@ class FutureSimulator:
         )
 
         try:
-            result = await self.llm.ainvoke([HumanMessage(content=prompt)])
-            raw = result.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-            return json.loads(raw)
+            from core.json_utils import parse_json_lenient
+            result = await get_llm("future_simulate").ainvoke(
+                [HumanMessage(content=prompt)]
+            )
+            parsed = parse_json_lenient(result.content)
+            return parsed if isinstance(parsed, dict) else None
         except Exception as e:
             log.warning("Future simulation failed: %s", e)
             return None

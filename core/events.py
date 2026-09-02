@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from core.timeutil import utcnow, parse_iso
 from typing import Any, Literal
 
 
@@ -21,12 +22,12 @@ class Event:
 
     source: EventSource
     type: str
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=utcnow)
     payload: dict = field(default_factory=dict)
 
     @property
     def age_seconds(self) -> float:
-        return (datetime.utcnow() - self.timestamp).total_seconds()
+        return (utcnow() - self.timestamp).total_seconds()
 
 
 # ── User events ───────────────────────────────────────────────────────────

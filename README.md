@@ -15,7 +15,7 @@ Most agents are a prompt plus tools. They have no state between turns except a t
 - **Opinions have origins.** Independent, adopted, or researched. An independence score flags sycophantic drift.
 - **Autonomy stays internal.** It does not ping you. Research notes and self-theorizing show up later as better context.
 
-Identity lives in [`SOUL.md`](SOUL.md) and is re-read every turn.
+Identity lives in local `SOUL.md` (gitignored) and is re-read every turn. Start from [`SOUL.md.example`](SOUL.md.example).
 
 ## Architecture
 
@@ -77,6 +77,7 @@ python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env              # then fill in OPENROUTER_API_KEY and Telegram
+cp SOUL.md.example SOUL.md        # then edit the identity; first run copies this if missing
 python main.py
 ```
 
@@ -115,7 +116,7 @@ journalctl -u companion@$USER -f
 
 ```
 Keeper/
-├── SOUL.md                 identity prompt (edit freely)
+├── SOUL.md.example         sample identity (copy to gitignored SOUL.md)
 ├── main.py                 process entry
 ├── agent/                  LangGraph + runner
 ├── core/                   orchestrator, state, self-model, opinions, LLM factory

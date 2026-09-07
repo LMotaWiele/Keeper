@@ -14,11 +14,21 @@ async def codebase_overview() -> str:
 
 
 @tool
+async def codebase_list_modules() -> str:
+    """List Keeper's own modules: path, pillar, one-line purpose. No source."""
+    from core.loop import companion
+    return companion.codebase.list_modules()
+
+
+@tool
 async def codebase_read_module(module_path: str) -> str:
-    """Read detailed info about one of Keeper's own modules (path like 'core/loop.py')."""
+    """Read one of Keeper's own modules (path like 'core/loop.py'): AST header plus source."""
     from core.loop import companion
     detail = companion.codebase.get_module_detail(module_path)
-    return detail[:6000]
+    source = companion.codebase.get_source(module_path)
+    if source.startswith("[File not found"):
+        return detail[:6000]
+    return f"{detail}\n\n--- source ---\n{source[:2500]}"
 
 
 @tool
@@ -34,11 +44,37 @@ async def self_theorize(user_id: int = 0) -> str:
             f"(minimum interval {companion.theorizer.MIN_INTERVAL_HOURS}h)."
         )
     proposals = result.get("proposals") or []
+    write_path = (
+        "Approved proposals are queued for Lucas to implement. "
+        "Nothing applies them automatically. The write path runs through him."
+    )
     if not proposals:
-        return "Theorizing finished with no new proposals."
-    lines = [f"Generated {len(proposals)} proposal(s):"]
+        return "Theorizing finished with no new proposals.\n" + write_path
+    lines = [
+        f"Generated {len(proposals)} proposal(s):",
+        write_path,
+    ]
     for i, p in enumerate(proposals):
-        lines.append(f"[{i}] {p.get('title', 'untitled')} — {p.get('rationale', '')[:240]}")
+        title = p.get("title", "untitled")
+        body = (
+            p.get("expected_impact")
+            or p.get("rationale")
+            or p.get("proposal")
+            or ""
+        )
+        chunk = f"[{i}] {title}"
+        rationale = (p.get("rationale") or "")[:400]
+        impact = (p.get("expected_impact") or "")[:400]
+        target = p.get("target_module") or ""
+        lines.append(chunk)
+        if target:
+            lines.append(f"  target: {target}")
+        if rationale:
+            lines.append(f"  rationale: {rationale}")
+        if impact:
+            lines.append(f"  impact: {impact}")
+        if body and body not in (rationale, impact):
+            lines.append(f"  {str(body)[:600]}")
     return "\n".join(lines)
 
 
@@ -111,6 +147,7 @@ async def goal_status() -> str:
 
 INTROSPECTION_TOOLS = [
     codebase_overview,
+    codebase_list_modules,
     codebase_read_module,
     self_theorize,
     simulate_action,

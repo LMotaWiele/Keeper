@@ -94,6 +94,7 @@ class APIBudget:
     spend_by_task: dict[str, float] = field(default_factory=dict)
     spend_by_model: dict[str, float] = field(default_factory=dict)
     calls_today: int = 0
+    budget_fatigue_reset: bool = False
 
     USD_TO_EUR: float = 0.92   # config constant, no live FX
 
@@ -110,6 +111,7 @@ class APIBudget:
             self.spend_by_model = {}
             self.calls_today = 0
             self.current_date = today
+            self.budget_fatigue_reset = True
 
     def record_cost_usd(self, cost_usd: float, task: str, model: str) -> None:
         self._check_reset()

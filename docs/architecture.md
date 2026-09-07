@@ -109,4 +109,4 @@ Each turn concatenates, in order:
 | `goals/` | Goal system, autonomy, research, self-theorizing |
 | `tg/` | Telegram interface |
 | `tools/` | Web search + explicit memory tools |
-| `SOUL.md` | Identity prompt |
+| `SOUL.md` | Local identity prompt (gitignored; seeded from `SOUL.md.example`) |

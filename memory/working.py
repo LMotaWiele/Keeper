@@ -153,7 +153,8 @@ class WorkingMemory:
                 for item in buf
             ]
 
-        path.write_text(json.dumps(data, indent=2))
+        from core.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(data, indent=2))
 
     def load(self, path: Path) -> None:
         """

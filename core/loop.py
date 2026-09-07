@@ -4,8 +4,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+import os
+import socket
 from pathlib import Path
+
+from core.timeutil import utcnow
 
 from config.settings import config
 from core.internal_state import InternalState
@@ -133,6 +136,7 @@ class ConsciousArchitecture:
         self._background_tasks: list[asyncio.Task] = []
         self._started = False
         self._session_active: dict[int, bool] = {}
+        self._save_lock = asyncio.Lock()
         self.environment.on_session_end_cb = self._on_env_session_end
 
     # ── Session query (for background processes) ──────────────────────────
@@ -140,12 +144,24 @@ class ConsciousArchitecture:
     def _on_env_session_end(self, user_id: int, message_count: int = 0) -> None:
         """TimeStream timeout ended a session — unblock background loops."""
         self._session_active[user_id] = False
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._save_state())
+        except RuntimeError:
+            pass
 
     def is_session_active(self, user_id: int) -> bool:
-        return self._session_active.get(user_id, False)
+        if not self._session_active.get(user_id, False):
+            return False
+        idle = (utcnow() - self.state.last_user_event).total_seconds() / 60
+        if idle >= config.session_timeout_minutes:
+            self._session_active[user_id] = False
+            log.info("Session timed out for user %s (idle %.1fm)", user_id, idle)
+            return False
+        return True
 
     def any_session_active(self) -> bool:
-        return any(self._session_active.values())
+        return any(self.is_session_active(uid) for uid in list(self._session_active))
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -154,6 +170,8 @@ class ConsciousArchitecture:
             return
 
         log.info("ConsciousArchitecture starting up…")
+
+        self._write_instance_identity()
 
         refresh_model_pricing()
 
@@ -205,6 +223,14 @@ class ConsciousArchitecture:
                 self.theorizer.restore(json.loads(theorizer_path.read_text()))
             except Exception as e:
                 log.warning("Failed to load theorizer state: %s", e)
+
+        sessions_path = state_dir / "sessions.json"
+        if sessions_path.exists():
+            try:
+                raw = json.loads(sessions_path.read_text())
+                self._session_active = {int(k): bool(v) for k, v in raw.items()}
+            except Exception as e:
+                log.warning("Failed to load sessions: %s", e)
 
         # 3. Restore working memory
         self.memory.working.load(state_dir / "working_memory.json")
@@ -260,73 +286,129 @@ class ConsciousArchitecture:
         self._started = False
         log.info("ConsciousArchitecture stopped. State saved.")
 
+    def _on_task_done(self, t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error("BACKGROUND TASK DIED: %s", t.get_name(), exc_info=exc)
+        else:
+            log.error("BACKGROUND TASK EXITED CLEANLY (unexpected): %s", t.get_name())
+
+    def _pid_is_keeper_main(self, pid: int) -> bool:
+        if pid <= 0 or pid == os.getpid():
+            return False
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return False
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+        return "main.py" in cmdline
+
+    def _write_instance_identity(self) -> None:
+        state_dir = _state_dir()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        path = state_dir / "instance.json"
+        if path.exists():
+            try:
+                prev = json.loads(path.read_text())
+            except Exception:
+                prev = {}
+            prev_pid = int(prev.get("pid") or 0)
+            if self._pid_is_keeper_main(prev_pid):
+                log.error(
+                    "SECOND INSTANCE DETECTED: pid=%s started_at=%s is still running. "
+                    "Telegram polling will conflict.",
+                    prev_pid,
+                    prev.get("started_at"),
+                )
+        payload = {
+            "pid": os.getpid(),
+            "started_at": utcnow().isoformat(),
+            "hostname": socket.gethostname(),
+        }
+        path.write_text(json.dumps(payload, indent=2))
+
     def _start_background_loops(self) -> None:
         loop = asyncio.get_running_loop()
         user_ids = list(config.allowed_user_ids)
         primary_user = user_ids[0] if user_ids else 0
 
-        self._background_tasks.append(
-            loop.create_task(self.environment.run_loop(
+        def _spawn(coro, name: str) -> None:
+            task = loop.create_task(coro, name=name)
+            task.add_done_callback(self._on_task_done)
+            self._background_tasks.append(task)
+
+        _spawn(
+            self.environment.run_loop(
                 user_id=primary_user,
                 base_interval_seconds=config.grounding_interval,
-            ))
+            ),
+            "grounding",
         )
-
-        self._background_tasks.append(
-            loop.create_task(self.memory.consolidator.run_loop(
+        _spawn(
+            self.memory.consolidator.run_loop(
                 user_ids=user_ids,
                 interval_minutes=config.consolidation_interval,
                 session_check=self.is_session_active,
-            ))
+            ),
+            "consolidator",
         )
-
-        self._background_tasks.append(
-            loop.create_task(self.self_model.run_loop(
+        _spawn(
+            self.self_model.run_loop(
                 user_ids=user_ids,
                 interval_minutes=config.self_model_interval,
-            ))
+            ),
+            "self_model",
         )
-
-        self._background_tasks.append(
-            loop.create_task(self.autonomous.run_loop(
+        _spawn(
+            self.autonomous.run_loop(
                 user_id=primary_user,
                 interval_minutes=config.autonomous_interval,
                 min_idle_minutes=2,
                 session_check=self.any_session_active,
-            ))
+            ),
+            "autonomous",
         )
 
         log.info("Background loops started (%d tasks)", len(self._background_tasks))
 
     async def _save_state(self) -> None:
-        state_dir = _state_dir()
-        try:
-            self.state.save(state_dir / "internal_state.json")
-            self.self_model.save(state_dir / "self_model.json")
-            self.goals.save(state_dir / "goals.json")
-            self.environment.save(state_dir / "environment.json")
-            self.self_model.opinions.save(state_dir / "opinions.json")
-            self.memory.working.save(state_dir / "working_memory.json")
+        from core.atomic import atomic_write_text
+        async with self._save_lock:
+            state_dir = _state_dir()
+            try:
+                self.state.save(state_dir / "internal_state.json")
+                self.self_model.save(state_dir / "self_model.json")
+                self.goals.save(state_dir / "goals.json")
+                self.environment.save(state_dir / "environment.json")
+                self.self_model.opinions.save(state_dir / "opinions.json")
+                self.memory.working.save(state_dir / "working_memory.json")
 
-            budgets_path = state_dir / "resource_budgets.json"
-            budgets_path.parent.mkdir(parents=True, exist_ok=True)
-            budgets_path.write_text(json.dumps({
-                "api": self.api_budget.snapshot(),
-            }, indent=2))
+                atomic_write_text(state_dir / "resource_budgets.json", json.dumps({
+                    "api": self.api_budget.snapshot(),
+                }, indent=2))
+                atomic_write_text(state_dir / "user_life.json", json.dumps(
+                    self.user_life.snapshot(), indent=2, default=str
+                ))
+                atomic_write_text(state_dir / "theorizer.json", json.dumps(
+                    self.theorizer.snapshot(), indent=2, default=str
+                ))
+                atomic_write_text(state_dir / "sessions.json", json.dumps(
+                    {str(uid): bool(active) for uid, active in self._session_active.items()},
+                    indent=2,
+                ))
 
-            life_path = state_dir / "user_life.json"
-            life_path.write_text(json.dumps(
-                self.user_life.snapshot(), indent=2, default=str
-            ))
-
-            theorizer_path = state_dir / "theorizer.json"
-            theorizer_path.write_text(json.dumps(
-                self.theorizer.snapshot(), indent=2, default=str
-            ))
-
-            log.info("State saved to %s", state_dir)
-        except Exception:
-            log.exception("Failed to save state")
+                log.info(
+                    "State saved to %s (pid=%d, state.last_updated=%s)",
+                    state_dir, os.getpid(), self.state.last_updated,
+                )
+            except Exception:
+                log.exception("Failed to save state")
 
     # ── Message processing (the main feedback loop) ───────────────────────
 
@@ -375,6 +457,7 @@ class ConsciousArchitecture:
         processing_time_ms: float = 0,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        forced_answer: bool = False,
     ) -> None:
         """
         Called after the agent produces a response.
@@ -392,30 +475,38 @@ class ConsciousArchitecture:
 
         self.memory.store_working(user_id, "assistant", response_text, salience=0.5)
 
+        degraded = forced_answer or len(response_text.strip()) < 60
+        if degraded:
+            log.warning(
+                "Degraded turn — response len=%d forced=%s; skipping self-observation",
+                len(response_text.strip()), forced_answer,
+            )
+
         await self.memory.store_episode(
             user_id=user_id,
             content=f"Responded: {response_text[:500]}",
             internal_state=self.state,
-            salience=0.5,
+            salience=0.1 if degraded else 0.5,
             type="event",
-            tags=["response"],
+            tags=["response", "degraded"] if degraded else ["response"],
         )
 
-        await self.self_model.observe(
-            user_id=user_id,
-            action=response_text[:500],
-            context=user_text[:300],
-            internal_state=self.state,
-        )
-
-        try:
-            await self.self_model.opinions.detect_opinions(
+        if not degraded:
+            await self.self_model.observe(
                 user_id=user_id,
-                user_message=user_text,
-                system_response=response_text,
+                action=response_text[:500],
+                context=user_text[:300],
+                internal_state=self.state,
             )
-        except Exception:
-            log.debug("Opinion detection failed", exc_info=True)
+
+            try:
+                await self.self_model.opinions.detect_opinions(
+                    user_id=user_id,
+                    user_message=user_text,
+                    system_response=response_text,
+                )
+            except Exception:
+                log.debug("Opinion detection failed", exc_info=True)
 
         try:
             updates = await self.goals.check_completions(self, user_id)
@@ -424,9 +515,7 @@ class ConsciousArchitecture:
         except Exception:
             pass
 
-        msg_count = self.state._messages_this_session
-        if msg_count > 0 and msg_count % 10 == 0:
-            await self._save_state()
+        await self._save_state()
 
     # ── Context building ──────────────────────────────────────────────────
 
@@ -438,33 +527,31 @@ class ConsciousArchitecture:
         memory_context = await self.memory.build_memory_context(user_id, user_text)
         messages = self.memory.working.to_langchain_messages(user_id)
 
+        blocks: list[tuple[str, str]] = []
+
         soul = ""
         soul_path = config.soul_file_path
         if soul_path.exists():
             soul = soul_path.read_text()
-
-        system_blocks = [soul] if soul else []
+        if soul:
+            blocks.append(("soul", soul))
 
         if memory_context:
-            system_blocks.append(memory_context)
+            blocks.append(("memory", memory_context))
 
-        # Internal state (Pillar 2)
-        system_blocks.append(self.state.to_prompt_context())
+        blocks.append(("internal_state", self.state.to_prompt_context()))
 
-        # Self-model (Pillar 5)
         self_model_ctx = self.self_model.to_prompt_context()
         if self_model_ctx:
-            system_blocks.append(self_model_ctx)
+            blocks.append(("self_model", self_model_ctx))
 
-        # Goals (Pillar 4)
         goals_ctx = self.goals.to_prompt_context()
         if goals_ctx:
-            system_blocks.append(goals_ctx)
+            blocks.append(("goals", goals_ctx))
 
-        # Environment (Pillar 3)
         env_ctx = self.environment.to_prompt_context()
         if env_ctx:
-            system_blocks.append(env_ctx)
+            blocks.append(("environment", env_ctx))
 
         from tools.web_search import HEALTH as search_health
         budget_lines = [self.api_budget.to_prompt_context()]
@@ -477,7 +564,7 @@ class ConsciousArchitecture:
                 "Daily budget nearly exhausted — running on the fast model, "
                 "responses will be shorter."
             )
-        system_blocks.append("## Resource awareness\n" + "\n".join(budget_lines))
+        blocks.append(("resource_awareness", "## Resource awareness\n" + "\n".join(budget_lines)))
 
         _lower = user_text.lower()
         ARCHITECTURE_KEYWORDS = {
@@ -486,18 +573,18 @@ class ConsciousArchitecture:
             "improve yourself", "your capabilities",
         }
         if any(kw in _lower for kw in ARCHITECTURE_KEYWORDS):
-            system_blocks.append(self.codebase.summary)
+            blocks.append(("architecture", self.codebase.summary))
 
         life_ctx = self.user_life.to_prompt_context()
         if life_ctx:
-            system_blocks.append(life_ctx)
+            blocks.append(("user_life", life_ctx))
 
-        # Tool instructions
-        system_blocks.append(
+        blocks.append((
+            "tool_instructions",
             "\n---\n"
             "You have tools: web_search, memory management, and introspection\n"
-            "(codebase_overview, codebase_read_module, self_theorize, simulate_action,\n"
-            "list_opinions, goal_status).\n"
+            "(codebase_overview, codebase_list_modules, codebase_read_module,\n"
+            "self_theorize, simulate_action, list_opinions, goal_status).\n"
             "\n"
             "Search the web before agreeing with a factual or contestable claim in a\n"
             "domain where you hold no externally-grounded opinion. Check list_opinions\n"
@@ -506,10 +593,19 @@ class ConsciousArchitecture:
             "it is you having no position of your own.\n"
             "\n"
             "Use memory tools proactively; your future self depends on them.\n"
-            "Reply naturally, as a companion would."
-        )
+            "Reply naturally, as a companion would.",
+        ))
 
-        system_prompt = "\n\n".join(system_blocks)
+        system_prompt = "\n\n".join(content for _, content in blocks)
+        log.info(
+            "PROMPT affect: arousal=%.3f valence=%.3f curiosity=%.3f fatigue=%.3f mode=%r blocks=%s",
+            self.state.arousal,
+            self.state.valence,
+            self.state.curiosity,
+            self.state.fatigue,
+            self.state.processing_mode,
+            [name for name, _ in blocks],
+        )
 
         return {
             "user_id": user_id,
@@ -606,6 +702,93 @@ class ConsciousArchitecture:
             "user_open_commitments": len(self.user_life.open_commitments),
             "hypotheses": len(self.self_model.model.get("hypotheses", [])),
         }
+
+    def diag_report(self) -> str:
+        """Read-only snapshot for the /diag Telegram command."""
+        from collections import Counter
+        from core.timeutil import utcnow
+        from tools.web_search import HEALTH as search_health
+
+        budget = self.api_budget
+        origin_counts = Counter(
+            o.origin.value for o in self.self_model.opinions.opinions.values()
+        )
+        independence = self.self_model.opinions.compute_independence_score()
+
+        task_lines = []
+        for t in self._background_tasks:
+            name = t.get_name() if hasattr(t, "get_name") else repr(t)
+            state = "done" if t.done() else "running"
+            extra = ""
+            if t.done() and not t.cancelled():
+                exc = t.exception() if not t.cancelled() else None
+                if exc is not None:
+                    extra = f" EXC={type(exc).__name__}:{exc}"
+            elif t.done() and t.cancelled():
+                extra = " cancelled"
+            task_lines.append(f"  {name}: {state}{extra}")
+
+        last_cycle = self.autonomous.last_cycle_at
+        if last_cycle is None:
+            auto_age = "never"
+        else:
+            mins = (utcnow() - last_cycle).total_seconds() / 60
+            auto_age = f"{mins:.1f}m ago"
+
+        lines = [
+            "Keeper /diag",
+            "",
+            f"budget: {budget.budget_fraction_used:.0%} "
+            f"(€{budget.spent_today_eur:.4f} / €{budget.daily_limit_eur:.2f})",
+            "spend_by_task:",
+        ]
+        if budget.spend_by_task:
+            for task, amt in sorted(budget.spend_by_task.items(), key=lambda x: -x[1]):
+                lines.append(f"  {task}: €{amt:.4f}")
+        else:
+            lines.append("  (none)")
+
+        st = self.state
+        lines += [
+            "",
+            f"state: arousal={st.arousal:.2f} valence={st.valence:.2f} "
+            f"curiosity={st.curiosity:.2f} fatigue={st.fatigue:.2f}",
+            f"last_updated: {st.last_updated.isoformat()}",
+            "drives:",
+        ]
+        for d in st.drives.all_drives:
+            lines.append(f"  {d.name}: {d.intensity:.3f}")
+
+        lines += ["", "goals:"]
+        active = self.goals.active_instrumental
+        if not active:
+            lines.append("  (none active)")
+        for g in active:
+            lines.append(
+                f"  {g.name} kind={g.kind} status={g.status.value} "
+                f"log={len(g.action_log)} ratings={g.action_ratings or {}}"
+            )
+
+        origin_str = ", ".join(f"{k}={v}" for k, v in sorted(origin_counts.items())) or "none"
+        lines += [
+            "",
+            f"opinions: n={len(self.self_model.opinions.opinions)} "
+            f"by_origin={{{origin_str}}} independence={independence:.2f}",
+            f"search: {search_health.snapshot()}",
+            f"self-model: v{self.self_model.model.get('model_version', 0)} "
+            f"obs={self.self_model.model.get('observation_count', 0)} "
+            f"hypotheses={len(self.self_model.model.get('hypotheses') or [])}",
+            "",
+            f"background_tasks: {len(self._background_tasks)} "
+            f"({sum(1 for t in self._background_tasks if not t.done())} running)",
+        ]
+        lines.extend(task_lines or ["  (none)"])
+        lines += [
+            "",
+            f"autonomous last cycle: {auto_age}",
+            f"autonomous last skip: {self.autonomous.last_skip_reason or '(none)'}",
+        ]
+        return "\n".join(lines)
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────

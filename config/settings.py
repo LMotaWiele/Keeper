@@ -68,13 +68,23 @@ class Settings:
     session_timeout_minutes: float = float(os.getenv("SESSION_TIMEOUT_MIN", "15"))
     working_memory_capacity: int = int(os.getenv("WORKING_MEMORY_CAPACITY", "20"))
 
+    # ── Diagnostics ───────────────────────────────────────────────────────
+    diag_mode: bool = os.getenv("DIAG_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
     def ensure_dirs(self) -> None:
-        """Create data directories if they don't exist."""
+        """Create data directories if they don't exist. Seed SOUL.md from the sample."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.midterm_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.chroma_db_path.parent.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "state").mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "logs").mkdir(parents=True, exist_ok=True)
         self.embedding_cache_dir.mkdir(parents=True, exist_ok=True)
+        if not self.soul_file_path.exists():
+            example = Path(__file__).resolve().parent.parent / "SOUL.md.example"
+            if example.exists():
+                self.soul_file_path.write_text(
+                    example.read_text(encoding="utf-8"), encoding="utf-8"
+                )
 
 
 config = Settings()

@@ -702,8 +702,8 @@ class GoalSystem:
             self.abandoned = [Goal.from_dict(d) for d in data["abandoned"]]
 
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.snapshot(), indent=2, default=str))
+        from core.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(self.snapshot(), indent=2, default=str))
 
     def load(self, path: Path) -> None:
         if path.exists():

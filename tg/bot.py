@@ -160,6 +160,13 @@ async def goals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, "\n".join(lines))
 
 
+async def diag_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read-only diagnostic dump."""
+    if not allowed(update):
+        return
+    await _reply(update, companion.diag_report())
+
+
 async def actions_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Show Elo tables for unbounded goals."""
     if not allowed(update):
@@ -222,6 +229,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("goals", goals_cmd))
     app.add_handler(CommandHandler("actions", actions_cmd))
+    app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     return app

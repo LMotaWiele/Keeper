@@ -37,10 +37,10 @@ BASELINE = {
 }
 
 DRIFT_RATE = {
-    "arousal": 0.008,
-    "valence": 0.005,
-    "curiosity": 0.006,
-    "fatigue": -0.003,
+    "arousal": 0.045,   # was 0.008
+    "valence": 0.020,   # was 0.005
+    "curiosity": 0.030, # was 0.006
+    "fatigue": 0.010,   # was 0.003
 }
 
 BOUNDS = (0.0, 1.0)
@@ -72,6 +72,8 @@ class InternalState:
         self.fatigue: float = BASELINE["fatigue"]
         self.drives = DriveSystem()
         self.last_updated: datetime = utcnow()
+        self.last_user_event: datetime = utcnow()
+        self._budget_fatigue_floor: float = 0.0
 
         self._recent_topics: list[str] = []
         self._messages_this_session: int = 0
@@ -98,13 +100,14 @@ class InternalState:
         d: dict[str, float] = {}
 
         if isinstance(event, UserMessageEvent):
-            d["arousal"] = 0.05 + event.novelty * 0.15
-            d["curiosity"] = (event.novelty - 0.3) * 0.2
+            self.last_user_event = utcnow()
+            d["arousal"] = 0.10 + event.novelty * 0.30
+            d["curiosity"] = (event.novelty - 0.2) * 0.32
             d["fatigue"] = (1 - event.novelty) * 0.03
             d["valence"] = (event.emotional_tone - 0.5) * 0.1
 
-            d["arousal"] += event.complexity * 0.08
-            d["curiosity"] += event.complexity * 0.1
+            d["arousal"] += event.complexity * 0.18
+            d["curiosity"] += event.complexity * 0.18
 
             self._messages_this_session += 1
 
@@ -177,11 +180,16 @@ class InternalState:
         return d
 
     def _apply_delta(self, delta: dict[str, float]) -> None:
-        """Apply deltas and clamp to bounds."""
+        """Apply deltas scaled by remaining headroom so dimensions approach bounds."""
         for dim, change in delta.items():
-            if hasattr(self, dim):
-                current = getattr(self, dim)
-                setattr(self, dim, _clamp(current + change))
+            if not hasattr(self, dim):
+                continue
+            current = getattr(self, dim)
+            if change > 0:
+                new = current + change * (1.0 - current)
+            else:
+                new = current + change * current
+            setattr(self, dim, _clamp(new))
 
     def _drift_toward_baseline(self, minutes: float) -> None:
         """Drift all dimensions toward their baselines."""
@@ -194,8 +202,14 @@ class InternalState:
 
     def apply_budget_fatigue(self, api_budget: Any) -> None:
         """Budget fatigue is a floor: you cannot feel energetic when nearly out of money."""
-        budget_fatigue = api_budget.compute_fatigue_contribution()
-        self.fatigue = max(self.fatigue, budget_fatigue)
+        if getattr(api_budget, "budget_fatigue_reset", False):
+            self._budget_fatigue_floor = 0.0
+            api_budget.budget_fatigue_reset = False
+        self._budget_fatigue_floor = float(api_budget.compute_fatigue_contribution())
+
+    @property
+    def effective_fatigue(self) -> float:
+        return _clamp(max(self.fatigue, self._budget_fatigue_floor))
 
     # ── Derived signals ───────────────────────────────────────────────────
 
@@ -209,7 +223,7 @@ class InternalState:
 
     @property
     def engagement_level(self) -> str:
-        score = (self.arousal + self.curiosity) / 2 - self.fatigue * 0.5
+        score = (self.arousal + self.curiosity) / 2 - self.effective_fatigue * 0.5
         if score > 0.65:
             return "deeply engaged"
         elif score > 0.45:
@@ -225,7 +239,7 @@ class InternalState:
             return "focused and exploratory — dig deep, ask questions, make connections"
         elif self.arousal > 0.6:
             return "alert and responsive — be direct and energetic"
-        elif self.fatigue > 0.6:
+        elif self.effective_fatigue > 0.6:
             return "conserving energy — be concise, prioritise what matters"
         elif self.curiosity > 0.6:
             return "curious — explore tangents, offer unexpected angles"
@@ -245,7 +259,7 @@ class InternalState:
             f"Mode: {self.processing_mode}\n"
             f"Arousal: {self.arousal:.2f} | "
             f"Curiosity: {self.curiosity:.2f} | "
-            f"Fatigue: {self.fatigue:.2f} | "
+            f"Fatigue: {self.effective_fatigue:.2f} | "
             f"Valence: {self.valence:.2f}\n"
             f"{drives_ctx}\n"
             "\n"
@@ -262,8 +276,10 @@ class InternalState:
             "valence": round(self.valence, 4),
             "curiosity": round(self.curiosity, 4),
             "fatigue": round(self.fatigue, 4),
+            "budget_fatigue_floor": round(self._budget_fatigue_floor, 4),
             "drives": self.drives.snapshot(),
             "last_updated": self.last_updated.isoformat(),
+            "last_user_event": self.last_user_event.isoformat(),
             "messages_this_session": self._messages_this_session,
         }
 
@@ -285,9 +301,17 @@ class InternalState:
                 self._drift_toward_baseline(elapsed)
                 self.drives.tick(elapsed)
 
+        last_user = data.get("last_user_event")
+        if last_user:
+            self.last_user_event = parse_iso(last_user)
+        else:
+            self.last_user_event = self.last_updated
+
+        self._budget_fatigue_floor = float(data.get("budget_fatigue_floor") or 0.0)
+
     def save(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.snapshot(), indent=2))
+        from core.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(self.snapshot(), indent=2))
 
     def load(self, path: Path) -> None:
         if path.exists():

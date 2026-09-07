@@ -142,3 +142,13 @@ class CodebaseIndex:
 
     def get_source(self, module_path: str) -> str:
         return get_full_source(self.project_root, module_path)
+
+    def list_modules(self) -> str:
+        """Path, pillar, one-line purpose — no source."""
+        if not self.index:
+            return "Codebase index is empty."
+        lines = []
+        for path, info in sorted(self.index.items()):
+            purpose = (info.get("purpose") or "").split("\n")[0].strip() or "no docstring"
+            lines.append(f"{path}\t{info.get('pillar')}\t{purpose}")
+        return "\n".join(lines)

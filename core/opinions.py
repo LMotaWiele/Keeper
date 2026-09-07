@@ -490,7 +490,7 @@ class OpinionRegistry:
         """
         active = [o for o in self.opinions.values() if o.conviction > 0.0]
         if not active:
-            return 0.5  # no data, assume neutral
+            return 0.0
 
         independent_weight = sum(
             o.conviction for o in active
@@ -502,7 +502,7 @@ class OpinionRegistry:
         )
         total_weight = sum(o.conviction for o in active)
 
-        return independent_weight / total_weight if total_weight > 0 else 0.5
+        return independent_weight / total_weight if total_weight > 0 else 0.0
 
     def detect_drift(self) -> list[str]:
         """
@@ -734,8 +734,8 @@ class OpinionRegistry:
 
     def save(self, path: Path) -> None:
         """Persist opinion registry to disk."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.snapshot(), indent=2, default=str))
+        from core.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(self.snapshot(), indent=2, default=str))
 
     def load(self, path: Path) -> None:
         """Restore opinion registry from disk."""

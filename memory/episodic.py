@@ -177,6 +177,7 @@ class EpisodicMemory:
             WHERE user_id = ?
               AND effective_strength >= ?
               AND (expires_at IS NULL OR expires_at > ?)
+              AND (tags IS NULL OR tags NOT LIKE '%"degraded"%')
         """
         params: list[Any] = [user_id, min_strength, _now_iso()]
 
@@ -369,7 +370,9 @@ class EpisodicMemory:
 
         lines = ["## What I remember about you"]
         for ep in episodes:
-            tags = json.loads(ep["tags"])
+            tags = json.loads(ep["tags"] or "[]")
+            if "degraded" in tags:
+                continue
             tag_str = f" [{', '.join(tags)}]" if tags else ""
             strength = ep.get("effective_strength", 1.0)
             # Dim fading memories with a visual cue

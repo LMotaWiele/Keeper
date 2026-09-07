@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import shutil
 import sys
+from pathlib import Path
 
 import structlog
 
@@ -29,9 +31,20 @@ def setup_logging() -> None:
         stream=sys.stdout,
         level=logging.INFO,
     )
+    log_dir = Path(config.data_dir) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fh = logging.handlers.RotatingFileHandler(
+        log_dir / "keeper.log", maxBytes=50_000_000, backupCount=5, encoding="utf-8",
+    )
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    ))
+    logging.getLogger().addHandler(fh)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("chromadb").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext._utils.networkloop").setLevel(logging.INFO)
 
 
 async def on_bot_startup(application) -> None:

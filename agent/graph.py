@@ -1,11 +1,13 @@
 """LangGraph agent — reason ⇄ tools. Context is built by the companion loop."""
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
+    HumanMessage,
     SystemMessage,
     ToolMessage,
 )
@@ -17,6 +19,8 @@ from config.settings import config
 from core.llm import Tier, get_llm
 from tools import ALL_TOOLS
 
+log = logging.getLogger(__name__)
+
 
 class CompanionState(TypedDict):
     user_id: int
@@ -26,6 +30,7 @@ class CompanionState(TypedDict):
     response_text: str
     tool_calls_made: int
     tier: str
+    forced_answer: bool
 
 
 _GRAPH_CACHE: dict[str, Any] = {}
@@ -92,7 +97,7 @@ async def reason(state: CompanionState) -> dict[str, Any]:
     return {
         "messages": [response],
         "tool_calls_pending": has_tool_calls,
-        "response_text": message_text(response.content),
+        "response_text": "" if has_tool_calls else message_text(response.content),
         "tool_calls_made": tool_count,
     }
 
@@ -128,16 +133,47 @@ async def tool_executor(state: CompanionState) -> dict[str, Any]:
     return {"messages": tool_messages, "tool_calls_pending": False}
 
 
+async def force_answer(state: CompanionState) -> dict[str, Any]:
+    """Tool budget exhausted — answer from what is already in the transcript."""
+    llm = get_llm("conversation")          # unbound: no tools
+    messages = (
+        [SystemMessage(content=state["system_prompt"])]
+        + state["messages"]
+        + [HumanMessage(content=(
+            "[system] Tool budget exhausted for this turn. Answer the user now, "
+            "using the tool results already in this transcript. State plainly what "
+            "you could not determine. Do not describe what you still intend to read."
+        ))]
+    )
+    response = await llm.ainvoke(messages)
+    made = state.get("tool_calls_made", 0)
+    log.warning("FORCED ANSWER after %d tool calls", made)
+    return {
+        "messages": [response],
+        "response_text": message_text(response.content),
+        "forced_answer": True,
+        "tool_calls_pending": False,
+    }
+
+
 async def finalize(state: CompanionState) -> dict[str, Any]:
     """Terminal node — runner reads response_text after the graph ends."""
+    if state.get("tool_calls_pending") and not state.get("forced_answer"):
+        log.error(
+            "finalize reached with tool_calls_pending and no forced_answer "
+            "(made=%s) — graph must not end here",
+            state.get("tool_calls_made"),
+        )
     return {}
 
 
-MAX_TOOL_CALLS = 12
+MAX_TOOL_CALLS = 16
 
 
 def route_after_reason(state: CompanionState) -> str:
-    if state["tool_calls_pending"] and state.get("tool_calls_made", 0) < MAX_TOOL_CALLS:
+    if state["tool_calls_pending"]:
+        if state.get("tool_calls_made", 0) >= MAX_TOOL_CALLS:
+            return "force_answer"
         return "tool_executor"
     return "finalize"
 
@@ -147,14 +183,17 @@ def build_graph() -> Any:
     g.add_node("load_context", load_context)
     g.add_node("reason", reason)
     g.add_node("tool_executor", tool_executor)
+    g.add_node("force_answer", force_answer)
     g.add_node("finalize", finalize)
     g.set_entry_point("load_context")
     g.add_edge("load_context", "reason")
     g.add_conditional_edges("reason", route_after_reason, {
         "tool_executor": "tool_executor",
+        "force_answer": "force_answer",
         "finalize": "finalize",
     })
     g.add_edge("tool_executor", "reason")
+    g.add_edge("force_answer", "finalize")
     g.add_edge("finalize", END)
     return g.compile()
 

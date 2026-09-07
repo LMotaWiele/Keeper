@@ -111,25 +111,75 @@ def _recompute_aggregates(goal: Any) -> None:
     goal.action_ratings = ratings
 
 
-def select_action_type(goal: Any, unavailable: set[str] | None = None) -> str:
+def _type_retired(goal: Any, atype: str) -> bool:
+    """True when a type has n>=3, zero productive actions, and last try < 24h ago."""
+    recs = [r for r in (goal.action_log or []) if r.get("action_type") == atype]
+    if len(recs) < 3:
+        return False
+    if any(r.get("artifact_refs") for r in recs):
+        return False
+    last_ts = max((r.get("timestamp") or "") for r in recs)
+    if not last_ts:
+        return True
+    try:
+        last = parse_iso(last_ts)
+    except Exception:
+        return True
+    age = (utcnow() - last).total_seconds()
+    return age < 24 * 3600
+
+
+def select_action_type(goal: Any, unavailable: set[str] | None = None) -> str | None:
     """Epsilon-greedy over action types, with forced exploration of unseen types."""
     blocked = unavailable or set()
-    types = [t for t in ACTION_TYPES if t not in blocked] or list(ACTION_TYPES)
+    types = [t for t in ACTION_TYPES if t not in blocked]
+    if not types:
+        log.info("AUTO skip: action_type_unavailable (all types blocked)")
+        return None
     ratings = goal.action_ratings or {}
+    retired = [t for t in types if _type_retired(goal, t)]
+    keep = [t for t in types if t not in retired]
+    if keep:
+        for t in retired:
+            n = int((ratings.get(t) or {}).get("n") or 0)
+            log.info(
+                "AUTO exclude: action_type=%s n=%s productive=0 (re-admit after 24h)",
+                t, n,
+            )
+        types = keep
+    else:
+        log.info(
+            "AUTO exclude skipped — every remaining type is unproductive; keeping %s",
+            types,
+        )
     for t in types:
         n = int((ratings.get(t) or {}).get("n") or 0)
         if n < 2:
+            log.info(
+                "AUTO select_action_type forced_explore=%s n=%s ratings=%s unavailable=%s",
+                t, n, ratings, sorted(blocked),
+            )
             return t
     ns = [int((ratings.get(t) or {}).get("n") or 0) for t in types]
     epsilon = 0.25 if min(ns) < 10 else 0.10
     if random.random() < epsilon:
-        return random.choice(types)
-    return max(
+        chosen = random.choice(types)
+        log.info(
+            "AUTO select_action_type epsilon=%.2f random=%s ratings=%s unavailable=%s",
+            epsilon, chosen, ratings, sorted(blocked),
+        )
+        return chosen
+    chosen = max(
         types,
         key=lambda t: float(
             (ratings.get(t) or {}).get("elo") or ACTION_PRIORS.get(t, ELO_SEED)
         ),
     )
+    log.info(
+        "AUTO select_action_type greedy=%s ratings=%s unavailable=%s",
+        chosen, ratings, sorted(blocked),
+    )
+    return chosen
 
 
 async def rate_action(goal: Any, record: ActionRecord, companion: Any) -> None:

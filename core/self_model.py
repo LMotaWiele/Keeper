@@ -603,6 +603,10 @@ class SelfModel:
         hypotheses = self.model.get("hypotheses", [])
         if hypotheses:
             parts.append("\n## Active hypotheses about myself")
+            parts.append(
+                "Approved proposals are queued for Lucas to implement. "
+                "Nothing applies them automatically. The write path runs through him."
+            )
             for h in hypotheses:
                 parts.append(
                     f"- {h['statement']} (confidence: {h.get('confidence', 0.5):.1f}) "
@@ -684,8 +688,8 @@ class SelfModel:
 
     def save(self, path: Path) -> None:
         """Persist the self-model to disk."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.snapshot(), indent=2, default=str))
+        from core.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(self.snapshot(), indent=2, default=str))
 
     def load(self, path: Path) -> None:
         """Restore the self-model from disk."""

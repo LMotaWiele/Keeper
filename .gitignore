@@ -1,66 +1,37 @@
-.venv/
-venv/
-__pycache__/
-*.pyc
+# Secrets (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Local identity prompt (sample is SOUL.md.example)
+SOUL.md
+
+# Runtime identity and private user interaction:
+# Telegram transcripts, episodic/semantic memory, working window,
+# learned goals/opinions/self-model/user-life, logs, DIAG_MODE dumps
 data/
 
-agent/__pycache__/__init__.cpython-313.pyc
-agent/__pycache__/graph.cpython-313.pyc
-agent/__pycache__/runner.cpython-313.pyc
-config/__pycache__/__init__.cpython-313.pyc
-config/__pycache__/settings.cpython-313.pyc
-core/__pycache__/__init__.cpython-313.pyc
-core/__pycache__/drive_system.cpython-313.pyc
-core/__pycache__/events.cpython-313.pyc
-core/__pycache__/internal_state.cpython-313.pyc
-core/__pycache__/loop.cpython-313.pyc
-core/__pycache__/self_model.cpython-313.pyc
-data/episodic.db
-data/chroma/chroma.sqlite3
-data/chroma/0281daed-a582-404e-8c53-3f9446053e8e/data_level0.bin
-data/chroma/0281daed-a582-404e-8c53-3f9446053e8e/header.bin
-data/chroma/0281daed-a582-404e-8c53-3f9446053e8e/length.bin
-data/chroma/0281daed-a582-404e-8c53-3f9446053e8e/link_lists.bin
-data/chroma/791056b3-a0e6-426e-90d4-571d2618d700/data_level0.bin
-data/chroma/791056b3-a0e6-426e-90d4-571d2618d700/header.bin
-data/chroma/791056b3-a0e6-426e-90d4-571d2618d700/length.bin
-data/chroma/791056b3-a0e6-426e-90d4-571d2618d700/link_lists.bin
-data/chroma/fae8ec7e-432b-4b8b-8c49-670015d67069/data_level0.bin
-data/chroma/fae8ec7e-432b-4b8b-8c49-670015d67069/header.bin
-data/chroma/fae8ec7e-432b-4b8b-8c49-670015d67069/length.bin
-data/chroma/fae8ec7e-432b-4b8b-8c49-670015d67069/link_lists.bin
-data/state/environment.json
-data/state/goals.json
-data/state/internal_state.json
-data/state/self_model.json
-environment/__pycache__/__init__.cpython-313.pyc
-environment/__pycache__/grounding.cpython-313.pyc
-environment/__pycache__/streams.cpython-313.pyc
-environment/__pycache__/time_sense.cpython-313.pyc
-goals/__pycache__/__init__.cpython-313.pyc
-goals/__pycache__/autonomous.cpython-313.pyc
-goals/__pycache__/system.cpython-313.pyc
-memory/__pycache__/__init__.cpython-313.pyc
-memory/__pycache__/consolidator.cpython-313.pyc
-memory/__pycache__/episodic.cpython-313.pyc
-memory/__pycache__/semantic.cpython-313.pyc
-memory/__pycache__/working.cpython-313.pyc
-tg/__pycache__/__init__.cpython-313.pyc
-tg/__pycache__/bot.cpython-313.pyc
-tools/__pycache__/__init__.cpython-313.pyc
-tools/__pycache__/memory_tools.cpython-313.pyc
-tools/__pycache__/web_search.cpython-313.pyc
-.env
-test_opinions.py
-core/__pycache__/opinions.cpython-313.pyc
-goals/__pycache__/research.cpython-313.pyc
-data/state/working_memory.json
-data/state/opinions.json
-data/state/resource_budgets.json
-data/state/theorizer.json
-data/state/user_life.json
-environment/__pycache__/future_sim.cpython-313.pyc
-core/__pycache__/user_life.cpython-313.pyc
-core/__pycache__/resource_budgets.cpython-313.pyc
-core/__pycache__/codebase_index.cpython-313.pyc
-goals/__pycache__/self_theorizing.cpython-313.pyc
+# Local investigation notes and traces that quote live sessions,
+# Telegram user ids, and overnight runs — not the public design docs
+docs/diag/
+docs/diag2/
+docs/fix/
+*.log
+
+# Python bytecode and virtualenvs
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / local tooling
+.code-review-graph/
+.idea/
+.vscode/
+*.swp
+*~

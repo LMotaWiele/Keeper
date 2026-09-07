@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -184,8 +185,16 @@ class EnvironmentalGrounding:
             "Grounding loop started (%d streams, base_interval=%ds)",
             len(self.streams), base_interval_seconds,
         )
+        kill_once = os.getenv("DIAG_KILL_GROUNDING", "0").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
 
         while self._running:
+            if kill_once:
+                kill_once = False
+                raise RuntimeError(
+                    "DIAG_KILL_GROUNDING: artificially killing grounding task"
+                )
             for stream in self.streams:
                 if not stream.enabled or not stream.is_due:
                     continue
@@ -273,7 +282,8 @@ class EnvironmentalGrounding:
             "time_sense": self.time_sense.snapshot(),
             "stats": self.stats,
         }
-        path.write_text(json.dumps(data, indent=2, default=str))
+        from core.atomic import atomic_write_text
+        atomic_write_text(path, json.dumps(data, indent=2, default=str))
 
     def load(self, path: Path) -> None:
         """Restore time sense and stream state."""

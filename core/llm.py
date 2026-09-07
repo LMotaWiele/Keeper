@@ -105,20 +105,39 @@ class BudgetCallback(AsyncCallbackHandler):
                 if cost_usd is not None:
                     break
 
+        inp = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        outp = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+        reasoning_tokens = None
+        if isinstance(details, dict):
+            reasoning_tokens = details.get("reasoning_tokens")
+        if reasoning_tokens is None:
+            reasoning_tokens = usage.get("reasoning_tokens")
+
+        reported = cost_usd is not None
         if cost_usd is not None:
             companion.api_budget.record_cost_usd(
                 float(cost_usd), task=self.task, model=self.model
             )
+            cost_logged = float(cost_usd)
         else:
             # Last resort: estimate from tokens using the pricing table.
-            inp = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
-            outp = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
             if inp or outp:
                 companion.api_budget.record_estimated(
                     inp, outp, model=self.model, task=self.task
                 )
+                from core.resource_budgets import MODEL_PRICING, DEFAULT_PRICING
+                inp_p, out_p = MODEL_PRICING.get(self.model, DEFAULT_PRICING)
+                cost_logged = inp * inp_p + outp * out_p
             else:
                 log.warning("No usage data for task=%s model=%s", self.task, self.model)
+                cost_logged = 0.0
+
+        log.info(
+            "LLM %s model=%s in=%s out=%s reason=%s cost=$%.5f source=%s",
+            self.task, self.model, inp, outp, reasoning_tokens, cost_logged,
+            "reported" if reported else "estimated",
+        )
 
     async def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
         self._record(response)

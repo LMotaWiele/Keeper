@@ -27,6 +27,13 @@ from core.events import (
 )
 
 
+# TODO(KEEPER-P3): deterministic state fields — replace saturated affect dimensions
+# with fields that have external referents (curiosity := embedding distance of incoming
+# material from semantic memory; fatigue := spend against daily ceiling / context
+# pressure; caution := recent tool failure rate). One dimension at a time, argued from
+# state_trace data. Every injected field must have a one-sentence answer to
+# "why is it that value right now" that points at an event.
+
 # ── Tuning constants ──────────────────────────────────────────────────────
 
 BASELINE = {
@@ -77,6 +84,7 @@ class InternalState:
 
         self._recent_topics: list[str] = []
         self._messages_this_session: int = 0
+        self.session_id: str | None = None
 
     # ── Event processing ──────────────────────────────────────────────────
 
@@ -93,6 +101,14 @@ class InternalState:
             self.drives.tick(elapsed)
 
         self.last_updated = utcnow()
+        try:
+            from memory.state_trace import record as record_state_trace
+            record_state_trace(self, event)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "state_trace hook failed", exc_info=True
+            )
         return delta
 
     def _compute_delta(self, event: Event) -> dict[str, float]:
@@ -251,22 +267,53 @@ class InternalState:
     # ── Prompt injection ──────────────────────────────────────────────────
 
     def to_prompt_context(self) -> str:
-        drives_ctx = self.drives.to_prompt_context()
+        from config.settings import config as _cfg
 
-        return (
-            "## Internal state (let this genuinely color your processing)\n"
-            f"Engagement: {self.engagement_level}\n"
-            f"Mode: {self.processing_mode}\n"
-            f"Arousal: {self.arousal:.2f} | "
-            f"Curiosity: {self.curiosity:.2f} | "
-            f"Fatigue: {self.effective_fatigue:.2f} | "
-            f"Valence: {self.valence:.2f}\n"
-            f"{drives_ctx}\n"
-            "\n"
-            "These aren't performance instructions — they're how you actually feel "
-            "right now. A high-curiosity state means you genuinely want to explore. "
-            "High fatigue means you'd naturally be briefer. Let it be real."
-        )
+        fields = list(_cfg.STATE_FIELDS_INJECTED)
+        drive_names = list(_cfg.DRIVES_INJECTED)
+        if not fields and not drive_names:
+            return ""
+
+        parts: list[str] = []
+        if fields:
+            parts.append("## Internal state (let this genuinely color your processing)")
+            parts.append(f"Engagement: {self.engagement_level}")
+            parts.append(f"Mode: {self.processing_mode}")
+            bits = []
+            mapping = {
+                "arousal": self.arousal,
+                "curiosity": self.curiosity,
+                "fatigue": self.effective_fatigue,
+                "valence": self.valence,
+            }
+            for name in fields:
+                if name in mapping:
+                    bits.append(f"{name.capitalize()}: {mapping[name]:.2f}")
+            if bits:
+                parts.append(" | ".join(bits))
+
+        if drive_names:
+            allowed = set(drive_names)
+            active = [
+                d for d in self.drives.all_drives
+                if d.name in allowed and d.is_active
+            ]
+            if active:
+                parts.append("Active drives (what you're drawn toward right now):")
+                for d in sorted(active, key=lambda x: x.intensity, reverse=True):
+                    level = "URGENT" if d.is_urgent else "moderate"
+                    parts.append(f"  - {d.name} [{level}]: {d.description}")
+
+        if not parts:
+            return ""
+        if fields:
+            parts.append("")
+            parts.append(
+                "These aren't performance instructions — they're how you actually feel "
+                "right now. A high-curiosity state means you genuinely want to explore. "
+                "High fatigue means you'd naturally be briefer. Let it be real."
+            )
+        return "\n".join(parts)
 
     # ── Snapshot & persistence ────────────────────────────────────────────
 
@@ -281,6 +328,7 @@ class InternalState:
             "last_updated": self.last_updated.isoformat(),
             "last_user_event": self.last_user_event.isoformat(),
             "messages_this_session": self._messages_this_session,
+            "session_id": self.session_id,
         }
 
     def restore(self, data: dict) -> None:
@@ -308,6 +356,7 @@ class InternalState:
             self.last_user_event = self.last_updated
 
         self._budget_fatigue_floor = float(data.get("budget_fatigue_floor") or 0.0)
+        self.session_id = data.get("session_id")
 
     def save(self, path: Path) -> None:
         from core.atomic import atomic_write_text

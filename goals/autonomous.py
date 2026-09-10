@@ -210,6 +210,7 @@ class AutonomousEngine:
                             salience=0.5,
                             type="event",
                             tags=["autonomous", "simulation", goal.name],
+                            source="autonomous_artifact",
                         )
                         artifact_refs = [f"episode:{ep_id}"]
                 else:
@@ -255,6 +256,7 @@ class AutonomousEngine:
                         salience=0.5,
                         type="event",
                         tags=["autonomous", "codebase", goal.name],
+                        source="autonomous_artifact",
                     )
                     artifact_refs = [f"episode:{ep_id}"]
 

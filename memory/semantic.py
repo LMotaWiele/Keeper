@@ -114,23 +114,26 @@ class SemanticMemory:
                     old_sources = []
 
             new_confidence = min(1.0, old_confidence + 0.1)
-            merged_sources = list(set(old_sources + (source_episode_ids or [])))
+            merged_sources = list(set(str(s) for s in (old_sources + (source_episode_ids or []))))
 
             col.update(
                 ids=[doc_id],
                 metadatas=[{
                     **old_meta,
                     "confidence": new_confidence,
-                    "source_episode_ids": str(merged_sources),
+                    "source_episode_ids": json.dumps(merged_sources),
+                    "episode_ids": json.dumps(merged_sources),
                     "reinforced_at": utcnow().isoformat(),
                     "reinforcement_count": old_meta.get("reinforcement_count", 0) + 1,
                     "invalidated": "false",
                 }],
             )
+            await self._register_refs(merged_sources, doc_id)
             return doc_id
 
         # New pattern — embed and store
         embedding = await self._embed(content)
+        source_ids = [str(s) for s in (source_episode_ids or [])]
         col.upsert(
             ids=[doc_id],
             embeddings=[embedding],
@@ -139,13 +142,19 @@ class SemanticMemory:
                 "stored_at": utcnow().isoformat(),
                 "pattern_type": pattern_type,
                 "confidence": confidence,
-                "source_episode_ids": str(source_episode_ids or []),
+                "source_episode_ids": json.dumps(source_ids),
+                "episode_ids": json.dumps(source_ids),
                 "reinforcement_count": 0,
                 "invalidated": "false",
                 **(metadata or {}),
             }],
         )
+        await self._register_refs(source_ids, doc_id)
         return doc_id
+
+    async def _register_refs(self, episode_ids: list[str], doc_id: str) -> None:
+        from memory.episodic import episodic
+        await episodic.add_episode_refs(episode_ids, "semantic", doc_id)
 
     # ── Search ────────────────────────────────────────────────────────────
 

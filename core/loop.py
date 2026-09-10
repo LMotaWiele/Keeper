@@ -144,6 +144,7 @@ class ConsciousArchitecture:
     def _on_env_session_end(self, user_id: int, message_count: int = 0) -> None:
         """TimeStream timeout ended a session — unblock background loops."""
         self._session_active[user_id] = False
+        self.state.session_id = None
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._save_state())
@@ -281,10 +282,15 @@ class ConsciousArchitecture:
                 except asyncio.CancelledError:
                     pass
 
-        await self._save_state()
+        if self._started:
+            await self._save_state()
+            log.info("ConsciousArchitecture stopped. State saved.")
+        else:
+            log.warning(
+                "Startup did not finish — skipping state save to avoid clobbering disk"
+            )
 
         self._started = False
-        log.info("ConsciousArchitecture stopped. State saved.")
 
     def _on_task_done(self, t: asyncio.Task) -> None:
         if t.cancelled():
@@ -419,6 +425,8 @@ class ConsciousArchitecture:
         """
         if not self._session_active.get(user_id, False):
             self._session_active[user_id] = True
+            import uuid as _uuid
+            self.state.session_id = str(_uuid.uuid4())
             self.environment.on_session_start(user_id)
 
         self.environment.on_user_message(user_id)
@@ -442,6 +450,7 @@ class ConsciousArchitecture:
             salience=0.6 + novelty * 0.3,
             type="event",
             tags=["user_input"],
+            source="user_turn",
         )
 
         context = await self.build_context(user_id, user_text)
@@ -489,6 +498,7 @@ class ConsciousArchitecture:
             salience=0.1 if degraded else 0.5,
             type="event",
             tags=["response", "degraded"] if degraded else ["response"],
+            source="keeper_response",
         )
 
         if not degraded:
@@ -596,6 +606,21 @@ class ConsciousArchitecture:
             "Reply naturally, as a companion would.",
         ))
 
+        bias_text = None
+        hypothesis_id = None
+        if config.ACTION_BIAS_ENABLED:
+            from core.action_bias import ensure_bias_text, prompt_tail, select_sticky
+            chosen = select_sticky(self.self_model.model)
+            if chosen is not None:
+                try:
+                    bias_text = await ensure_bias_text(chosen)
+                    hypothesis_id = chosen.get("id")
+                except Exception:
+                    log.warning("action_bias text generation failed", exc_info=True)
+            tail = prompt_tail(self.self_model.model, bias_text)
+            if tail:
+                blocks.append(("action_bias", tail))
+
         system_prompt = "\n\n".join(content for _, content in blocks)
         log.info(
             "PROMPT affect: arousal=%.3f valence=%.3f curiosity=%.3f fatigue=%.3f mode=%r blocks=%s",
@@ -616,6 +641,8 @@ class ConsciousArchitecture:
             "active_goals": [g.to_dict() for g in self.goals.active_instrumental],
             "engagement_level": self.state.engagement_level,
             "processing_mode": self.state.processing_mode,
+            "action_bias_text": bias_text,
+            "action_bias_hypothesis_id": hypothesis_id,
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────

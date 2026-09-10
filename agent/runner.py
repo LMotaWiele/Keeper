@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -77,6 +78,17 @@ async def run_agent(user_id: int, user_text: str) -> str:
         prompt_path.write_text(context.get("system_prompt") or "")
         log.info("DIAG dumped system prompt to %s (%d chars)", prompt_path, prompt_path.stat().st_size)
 
+    trial_id = None
+    turn_id = str(uuid.uuid4())
+    bias_text = context.get("action_bias_text")
+    hypothesis_id = context.get("action_bias_hypothesis_id")
+    if config.ACTION_BIAS_ENABLED and bias_text and hypothesis_id:
+        try:
+            from core.action_bias import insert_trial
+            trial_id = insert_trial(turn_id, str(hypothesis_id), str(bias_text))
+        except Exception:
+            log.warning("action_bias trial insert failed", exc_info=True)
+
     result = await companion_graph.ainvoke(initial_state)
 
     last_ai = next(
@@ -132,6 +144,29 @@ async def run_agent(user_id: int, user_text: str) -> str:
         output_tokens=output_tokens,
         forced_answer=forced_answer,
     )
+
+    if trial_id is not None and bias_text and hypothesis_id:
+        try:
+            from core.action_bias import (
+                schedule_evaluation,
+                trial_eligible_after_reply,
+                write_trial_verdict,
+            )
+            tool_only = bool(getattr(last_ai, "tool_calls", None)) and not (
+                response_text or ""
+            ).strip()
+            if trial_eligible_after_reply(
+                response_text=response_text,
+                tool_calls_only=tool_only,
+                error=False,
+            ):
+                schedule_evaluation(
+                    trial_id, str(bias_text), response_text, str(hypothesis_id)
+                )
+            else:
+                write_trial_verdict(trial_id, "INVALID", "ineligible reply")
+        except Exception:
+            log.warning("action_bias eval schedule failed", exc_info=True)
 
     last_meta = getattr(last_ai, "response_metadata", None) or {} if last_ai else {}
     last_finish_reason = last_meta.get("finish_reason")

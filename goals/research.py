@@ -1,4 +1,8 @@
 """Research engine — web search to EXTERNAL opinions so pushback is not just mirroring."""
+
+# TODO(KEEPER-P2): research expansion — multi-query fan-out (<=5 typed slots),
+# follow-up chain depth <=3 gated on a filled OpenQuestion, session-wide page/call
+# budgets, URL + embedding dedup. Blocked on evidence-based forgetting (this patch).
 from __future__ import annotations
 
 import json
@@ -216,7 +220,10 @@ class ResearchEngine:
                 salience=0.8,
                 type="research",
                 tags=["research", "opinion", opinion.domain],
+                source="autonomous_artifact",
             )
+            from memory.episodic import episodic
+            await episodic.add_episode_ref(str(episode_id), "opinion", opinion.id)
 
         result = {
             "topic": topic,

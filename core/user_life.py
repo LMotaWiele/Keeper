@@ -18,6 +18,7 @@ class UserCommitment:
     status: str = "open"  # open | completed | abandoned | unknown
     followup_count: int = 0
     resolved_at: str | None = None
+    source_episode_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -49,13 +50,30 @@ class UserLifeTracker:
     wellbeing_history: list[WellbeingSnapshot] = field(default_factory=list)
     achievements: list[LifeAchievement] = field(default_factory=list)
 
-    def record_commitment(self, description: str, deadline: str | None = None):
+    def record_commitment(
+        self,
+        description: str,
+        deadline: str | None = None,
+        source_episode_ids: list[str] | None = None,
+    ):
         """User said they'd do something — track it."""
+        ids = [str(s) for s in (source_episode_ids or [])]
         self.commitments.append(UserCommitment(
             description=description,
             mentioned_at=utcnow().isoformat(),
             deadline=deadline,
+            source_episode_ids=ids,
         ))
+        if ids:
+            try:
+                import asyncio
+                from memory.episodic import episodic
+                ref_id = f"commitment:{description[:40]}"
+                loop = asyncio.get_running_loop()
+                for eid in ids:
+                    loop.create_task(episodic.add_episode_ref(eid, "user_life", ref_id))
+            except Exception:
+                log.warning("user_life episode ref failed", exc_info=True)
 
     def resolve_commitment(self, index: int, status: str):
         """Mark a commitment as completed, abandoned, or unknown."""
@@ -169,6 +187,7 @@ class UserLifeTracker:
                     "status": c.status,
                     "followup_count": c.followup_count,
                     "resolved_at": c.resolved_at,
+                    "source_episode_ids": c.source_episode_ids,
                 }
                 for c in self.commitments
             ],

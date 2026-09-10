@@ -151,6 +151,7 @@ class EnvironmentalGrounding:
                     salience=salience,
                     type="event",
                     tags=["environment", event.type],
+                    source="environment_event",
                 )
                 self._events_stored += 1
 

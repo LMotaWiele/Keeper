@@ -49,6 +49,7 @@ class Opinion:
     revision_history: list[dict] = field(default_factory=list)
     related_evidence: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    source_episode_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -289,6 +290,7 @@ class OpinionRegistry:
         conviction: float = 0.5,
         evidence: list[str] | None = None,
         user_id: int = 0,
+        source_episode_ids: list[str] | None = None,
     ) -> Opinion:
         """Register a new tracked opinion."""
         opinion = Opinion(
@@ -301,6 +303,7 @@ class OpinionRegistry:
             formed_at=_utcnow_iso(),
             related_evidence=evidence or [],
             tags=[domain, origin.value],
+            source_episode_ids=[str(s) for s in (source_episode_ids or [])],
         )
         self.opinions[opinion.id] = opinion
 
@@ -311,7 +314,7 @@ class OpinionRegistry:
 
         # Store as episodic memory
         if self.memory:
-            await self.memory.store_episode(
+            ep_id = await self.memory.store_episode(
                 user_id=user_id,
                 content=(
                     f"opinion_formed [{origin.value}]: "
@@ -321,7 +324,12 @@ class OpinionRegistry:
                 salience=0.7,
                 type="opinion",
                 tags=["opinion", domain, origin.value],
+                source="autonomous_artifact",
             )
+            from memory.episodic import episodic
+            for sid in opinion.source_episode_ids:
+                await episodic.add_episode_ref(sid, "opinion", opinion.id)
+            await episodic.add_episode_ref(str(ep_id), "opinion", opinion.id)
 
         log.info(
             "Opinion formed: [%s] %s (origin=%s, conviction=%.2f)",

@@ -20,6 +20,22 @@ def _int_set(env_key: str, default: str = "") -> set[int]:
     return {int(x.strip()) for x in raw.split(",") if x.strip()}
 
 
+def _str_list(env_key: str, default: list[str]) -> list[str]:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return list(default)
+    if not raw.strip():
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _bool_env(env_key: str, default: bool) -> bool:
+    raw = os.getenv(env_key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Settings:
     """Singleton-ish config object. Access via `config`."""
 
@@ -70,6 +86,47 @@ class Settings:
 
     # ── Diagnostics ───────────────────────────────────────────────────────
     diag_mode: bool = os.getenv("DIAG_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+    # ── Evidence-based salience (KEEPER_PATCH_01 B) ───────────────────────
+    SALIENCE_SOURCE_PRIOR: dict[str, float] = {
+        "user_turn": 1.00,
+        "self_observation": 0.50,
+        "tool_result": 0.60,
+        "environment_event": 0.40,
+        "keeper_response": 0.25,
+        "autonomous_artifact": 0.20,
+    }
+    W_SOURCE: float = 0.30
+    W_NOVELTY: float = 0.20
+    W_RECALL: float = 0.25
+    W_REF: float = 0.25
+    W_AGE: float = 0.15
+    FORGET_MIN_AGE_DAYS: int = int(os.getenv("FORGET_MIN_AGE_DAYS", "7"))
+    FORGET_THRESHOLD: float = float(os.getenv("FORGET_THRESHOLD", "0.25"))
+    FORGET_MAX_PER_PASS: int = int(os.getenv("FORGET_MAX_PER_PASS", "50"))
+    FORGET_DRY_RUN: bool = _bool_env("FORGET_DRY_RUN", True)
+    FORGET_PROMPT_CHAR_BUDGET: int = int(os.getenv("FORGET_PROMPT_CHAR_BUDGET", "4000"))
+
+    # ── Variance-gated state injection (KEEPER_PATCH_01 C) ────────────────
+    # Full current set so merge is behaviour-neutral; trim from state_variance.py.
+    STATE_FIELDS_INJECTED: list[str] = _str_list(
+        "STATE_FIELDS_INJECTED",
+        ["arousal", "valence", "curiosity", "fatigue"],
+    )
+    DRIVES_INJECTED: list[str] = _str_list(
+        "DRIVES_INJECTED",
+        ["understand", "connect", "create", "resolve", "express"],
+    )
+
+    # ── action_bias (KEEPER_PATCH_01 D) ───────────────────────────────────
+    ACTION_BIAS_ENABLED: bool = _bool_env("ACTION_BIAS_ENABLED", True)
+    ACTION_BIAS_STREAK_LEN: int = int(os.getenv("ACTION_BIAS_STREAK_LEN", "3"))
+    STANDING_CONSTRAINTS_MAX: int = int(os.getenv("STANDING_CONSTRAINTS_MAX", "3"))
+    ACTION_BIAS_EVAL_MODEL: str = os.getenv(
+        "ACTION_BIAS_EVAL_MODEL",
+        os.getenv("MODEL_LOW", "deepseek/deepseek-v4-flash-0731"),
+    )
+    ACTION_BIAS_MIN_REPLY_TOKENS: int = int(os.getenv("ACTION_BIAS_MIN_REPLY_TOKENS", "20"))
 
     def ensure_dirs(self) -> None:
         """Create data directories if they don't exist. Seed SOUL.md from the sample."""

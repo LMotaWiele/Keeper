@@ -61,7 +61,7 @@ async def memory_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     uid = update.effective_user.id
     from memory.episodic import episodic
-    block = await episodic.format_for_prompt(uid)
+    block, _, _ = await episodic.format_for_prompt(uid)
     await _reply(update, block or "Nothing stored in episodic memory yet.")
 
 

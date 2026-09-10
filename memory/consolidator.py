@@ -108,7 +108,7 @@ class MemoryConsolidator:
                 result["skipped"] = True
                 result["reason"] = "skipped_budget"
                 result["episodes_decayed"] = await episodic.apply_decay(user_id)
-                result["episodes_forgotten"] = await episodic.forget(user_id)
+                result["episodes_forgotten"] = await episodic.forget_by_evidence(user_id)
                 return result
 
             new_count = episodic.new_episodes_since_consolidation(user_id)
@@ -126,7 +126,7 @@ class MemoryConsolidator:
                 result["reason"] = "skipped_no_new"
                 # Still apply decay/forgetting (cheap, no LLM call)
                 result["episodes_decayed"] = await episodic.apply_decay(user_id)
-                result["episodes_forgotten"] = await episodic.forget(user_id)
+                result["episodes_forgotten"] = await episodic.forget_by_evidence(user_id)
                 return result
             # 1. Get recent episodes
             episodes = await episodic.get_for_consolidation(
@@ -150,7 +150,7 @@ class MemoryConsolidator:
                     # 4. Store new patterns in semantic memory
                     for i, pattern in enumerate(patterns):
                         source_ids = [
-                            episodes[idx]["id"]
+                            str(episodes[idx].get("episode_id") or episodes[idx]["id"])
                             for idx in pattern.get("source_indices", [])
                             if idx < len(episodes)
                         ]
@@ -166,7 +166,7 @@ class MemoryConsolidator:
             result["episodes_decayed"] = await episodic.apply_decay(user_id)
 
             # 6. Forget very weak memories
-            result["episodes_forgotten"] = await episodic.forget(user_id)
+            result["episodes_forgotten"] = await episodic.forget_by_evidence(user_id)
 
             self._last_run[user_id] = utcnow()
 

@@ -142,6 +142,7 @@ class SelfTheorizer:
                     salience=0.7,
                     type="event",
                     tags=["self_theorizing", "meta", "self_improvement"],
+                    source="autonomous_artifact",
                 )
 
             log.info(

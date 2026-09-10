@@ -10,6 +10,23 @@ from memory.semantic import SemanticMemory, semantic
 from memory.consolidator import MemoryConsolidator, consolidator
 
 
+def _infer_source(type: EpisodeType, tags: list[str] | None) -> str:
+    tags = tags or []
+    if "user_input" in tags:
+        return "user_turn"
+    if type == "self_observation" or "self_model" in tags:
+        return "self_observation"
+    if "response" in tags:
+        return "keeper_response"
+    if "environment" in tags:
+        return "environment_event"
+    if "tool" in tags:
+        return "tool_result"
+    if type == "research" or "autonomous" in tags or type == "opinion":
+        return "autonomous_artifact"
+    return "user_turn"
+
+
 class MemorySystem:
     """
     Unified memory interface. The rest of the system talks to this —
@@ -43,38 +60,29 @@ class MemorySystem:
         salience: float = 0.5,
         type: EpisodeType = "event",
         tags: list[str] | None = None,
-    ) -> int:
+        source: str | None = None,
+    ) -> str:
         """
-        Store an experience. If an internal state is provided,
-        its arousal/valence are used to compute emotional weight
-        and the full state is snapshotted.
+        Store an experience. Returns the UUID episode_id.
+        Encoding strength is no longer taken from InternalState.compute_salience().
         """
-        emotional_weight = 0.5
         state_snapshot = {}
-
         if internal_state is not None:
-            # internal_state is expected to have compute_salience() and snapshot()
-            # but we gracefully handle dicts or missing methods
-            if hasattr(internal_state, "compute_salience"):
-                emotional_weight = internal_state.compute_salience()
-            elif isinstance(internal_state, dict):
-                arousal = internal_state.get("arousal", 0.5)
-                valence = internal_state.get("valence", 0.5)
-                emotional_weight = (arousal + abs(valence - 0.5)) / 1.5
-
             if hasattr(internal_state, "snapshot"):
                 state_snapshot = internal_state.snapshot()
             elif isinstance(internal_state, dict):
                 state_snapshot = internal_state
 
+        inferred = source or _infer_source(type, tags)
         return await self.episodic.store(
             user_id=user_id,
             type=type,
             content=content,
             tags=tags,
             importance=salience,
-            emotional_weight=emotional_weight,
+            emotional_weight=0.5,
             state_snapshot=state_snapshot,
+            source=inferred,
         )
 
     def store_working(
@@ -156,17 +164,18 @@ class MemorySystem:
         Combines all three layers into a coherent narrative.
         """
         parts = []
+        recalled: list[str] = []
+        used: list[str] = []
 
-        # Episodic — what I remember
-        ep_block = await self.episodic.format_for_prompt(user_id)
+        ep_block, recalled, used = await self.episodic.format_for_prompt(user_id)
         if ep_block:
             parts.append(ep_block)
 
-        # Semantic — what I've learned
         sem_block = await self.semantic.format_for_prompt(user_id, query)
         if sem_block:
             parts.append(sem_block)
 
+        await self.episodic.increment_counters(recalled, used)
         return "\n\n".join(parts) if parts else ""
 
     # ── Lifecycle ─────────────────────────────────────────────────────────

@@ -48,6 +48,8 @@ TASK_TIERS: dict[str, Tier] = {
     "action_rating":           Tier.LOW,
     "completion_check":        Tier.LOW,
     "autonomous_pursuit":      Tier.LOW,
+    "action_bias_eval":        Tier.LOW,
+    "action_bias_text":        Tier.MID,
 }
 
 # Default sampling per task. Preserve the temperatures already in the code.
@@ -71,6 +73,8 @@ TASK_PARAMS: dict[str, dict[str, Any]] = {
     "action_rating":           {"temperature": 0.2, "max_tokens": 768},
     "completion_check":        {"temperature": 0.1, "max_tokens": 512},
     "autonomous_pursuit":      {"temperature": 0.7, "max_tokens": 1024},
+    "action_bias_eval":        {"temperature": 0.0, "max_tokens": 60},
+    "action_bias_text":        {"temperature": 0.3, "max_tokens": 128},
 }
 
 

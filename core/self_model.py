@@ -310,6 +310,7 @@ class SelfModel:
             salience=0.8,
             type="self_observation",
             tags=["self_model"],
+            source="self_observation",
         )
 
     def _compact_observation(
@@ -445,6 +446,7 @@ class SelfModel:
                 salience=0.9,
                 type="event",
                 tags=["self_model", "meta"],
+                source="autonomous_artifact",
             )
             return True
 
@@ -542,12 +544,26 @@ class SelfModel:
             if not isinstance(hypotheses, list):
                 return []
 
+            from core.action_bias import ensure_hypothesis_fields
+            version = self.model.get("model_version", 0)
+            old = {
+                h.get("statement"): h
+                for h in (self.model.get("hypotheses") or [])
+            }
+            merged = []
             for h in hypotheses:
-                h["generated_at"] = utcnow().isoformat()
-                h["tested"] = False
-
-            self.model["hypotheses"] = hypotheses
-            return hypotheses
+                prev = old.get(h.get("statement")) or {}
+                if prev:
+                    for key in (
+                        "id", "tested", "actionable", "bias_text", "trial_log",
+                    ):
+                        if key in prev:
+                            h[key] = prev[key]
+                h.setdefault("generated_at", utcnow().isoformat())
+                h.setdefault("tested", False)
+                merged.append(h)
+            self.model["hypotheses"] = ensure_hypothesis_fields(merged, version)
+            return self.model["hypotheses"]
         except Exception as e:
             log.warning("Hypothesis generation failed: %s", e)
             return []
@@ -681,6 +697,11 @@ class SelfModel:
         opinions_data = data.pop("_opinions", None)
         guard_data = data.pop("_recursion_guard", None)
         self.model.update(data)
+        from core.action_bias import ensure_hypothesis_fields
+        self.model["hypotheses"] = ensure_hypothesis_fields(
+            self.model.get("hypotheses") or [],
+            self.model.get("model_version") or 0,
+        )
         if opinions_data:
             self.opinions.restore(opinions_data)
         if guard_data:

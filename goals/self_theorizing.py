@@ -86,7 +86,13 @@ class SelfTheorizer:
         self._last_run: datetime | None = None
         self._proposals: list[dict] = []
 
-    async def theorize(self, user_id: int, internal_state: Any) -> dict | None:
+    async def theorize(
+        self,
+        user_id: int,
+        internal_state: Any,
+        *,
+        apply_jev_gate: bool = True,
+    ) -> dict | None:
         """Run one theorizing cycle. Returns the analysis or None."""
         if self._last_run and (
             utcnow() - self._last_run
@@ -105,6 +111,24 @@ class SelfTheorizer:
             observations = [o["content"] for o in obs]
 
         obs_text = "\n".join(f"- {o}" for o in observations[-15:]) or "No observations yet"
+
+        if apply_jev_gate:
+            try:
+                from core.jev import jev_should_run
+                if not await jev_should_run(
+                    "architecture_question_open",
+                    {
+                        "architecture_summary": arch_summary[:3000],
+                        "tensions": (self.self_model.model.get("tensions") if self.self_model else None),
+                        "recent_observations": obs_text[:3000],
+                    },
+                    background=True,
+                    task="self_theorize",
+                ):
+                    log.info("self_theorize skipped — jev architecture_question_open")
+                    return None
+            except Exception:
+                log.debug("self_theorize Jev gate failed — fail open", exc_info=True)
 
         prompt = THEORIZE_PROMPT.format(
             architecture_summary=arch_summary,

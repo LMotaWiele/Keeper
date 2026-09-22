@@ -52,10 +52,23 @@ async def search_long_term_memory(user_id: int, query: str) -> str:
     memories = await semantic.search(user_id, query, n_results=5)
     if not memories:
         return "No relevant semantic memories found."
-    lines = [
-        f"- (relevance {m['relevance']:.2f}, confidence {m['confidence']:.1f}) {m['content']}"
-        for m in memories
-    ]
+    from core.timeutil import memory_time_prefix, parse_iso, utcnow
+    from memory.timebind import resolve_event_time
+
+    now = utcnow()
+    lines = []
+    for m in memories:
+        meta = m.get("metadata") or {}
+        raw = meta.get("event_at") or meta.get("stored_at") or ""
+        try:
+            event_dt = parse_iso(raw) if raw else now
+        except Exception:
+            event_dt, _ = resolve_event_time(m["content"], now)
+        prefix = memory_time_prefix(event_dt, now)
+        lines.append(
+            f"- (relevance {m['relevance']:.2f}, confidence {m['confidence']:.1f}) "
+            f"{prefix} {m['content']}"
+        )
     return "Relevant memories:\n" + "\n".join(lines)
 
 
@@ -67,12 +80,19 @@ async def recall_facts(user_id: int) -> str:
     if not facts and not prefs:
         return "No facts or preferences stored yet."
     lines = []
+    ids: list[str] = []
     for f in facts:
         strength = f.get("effective_strength", 1.0)
         fade = " (fading)" if strength < 0.5 else ""
-        lines.append(f"[fact] {f['content']}{fade}")
+        _, prefix = episodic._event_fields(f)
+        lines.append(f"[fact] {prefix} {f['content']}{fade}")
+        ids.append(f.get("episode_id") or str(f["id"]))
     for p in prefs:
-        lines.append(f"[preference] {p['content']}")
+        _, prefix = episodic._event_fields(p)
+        lines.append(f"[preference] {prefix} {p['content']}")
+        ids.append(p.get("episode_id") or str(p["id"]))
+    if ids:
+        await episodic.increment_counters(ids, [])
     return "\n".join(lines)
 
 

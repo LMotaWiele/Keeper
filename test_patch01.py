@@ -232,6 +232,7 @@ def test_three_violated_marks_not_actionable():
             "confidence": 0.8,
             "tested": False,
             "actionable": None,
+            "capability_verified": True,
             "bias_text": "Ask one question.",
             "trial_log": [],
         }],
@@ -288,4 +289,6 @@ def test_ensure_hypothesis_fields_assigns_ids():
     assert hyps[0]["id"] == "h-v12-01"
     assert hyps[0]["actionable"] is None
     assert hyps[0]["trial_log"] == []
+    assert hyps[0]["capability_verified"] is False
+    assert hyps[0]["capability_note"] is None
     assert eligible_hypotheses(hyps)

@@ -267,6 +267,18 @@ async def _check_user_confirmed(
     )
     prompt = USER_CONFIRMED_PROMPT.format(question=question, turns=turns or "(none)")
     try:
+        from core.jev import jev_should_run
+        if not await jev_should_run(
+            "human_confirmed",
+            {"question": question, "turns": (turns or "")[:4000]},
+            background=False,
+            task="completion_check",
+        ):
+            log.debug("completion_check skipped — jev human_confirmed")
+            return False, "user has not confirmed"
+    except Exception:
+        log.debug("completion_check Jev gate failed — fail open", exc_info=True)
+    try:
         from core.json_utils import parse_json_lenient
         result = await get_llm("completion_check", json_mode=True).ainvoke(
             [HumanMessage(content=prompt)]

@@ -16,7 +16,7 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from config.settings import config
-from core.llm import Tier, get_llm
+from core.llm import Tier, fallback_model_for, get_llm
 from tools import ALL_TOOLS
 
 log = logging.getLogger(__name__)
@@ -44,8 +44,13 @@ def _llm_for_tier(tier: Tier):
             Tier.MID: config.model_mid,
             Tier.LOW: config.model_low,
         }[tier]
-        llm = get_llm("conversation", model=model)
-        _GRAPH_CACHE[tier.value] = llm.bind_tools(ALL_TOOLS)
+        llm = get_llm("conversation", model=model, wrap_fallback=False)
+        bound = llm.bind_tools(ALL_TOOLS)
+        fb = fallback_model_for("conversation", model)
+        if fb:
+            fb_llm = get_llm("conversation", model=fb, wrap_fallback=False)
+            bound = bound.with_fallbacks([fb_llm.bind_tools(ALL_TOOLS)])
+        _GRAPH_CACHE[tier.value] = bound
     return _GRAPH_CACHE[tier.value]
 
 
@@ -135,7 +140,16 @@ async def tool_executor(state: CompanionState) -> dict[str, Any]:
 
 async def force_answer(state: CompanionState) -> dict[str, Any]:
     """Tool budget exhausted — answer from what is already in the transcript."""
-    llm = get_llm("conversation")          # unbound: no tools
+    try:
+        tier = Tier(state.get("tier") or Tier.HIGH.value)
+    except ValueError:
+        tier = Tier.HIGH
+    model = {
+        Tier.HIGH: config.model_high,
+        Tier.MID: config.model_mid,
+        Tier.LOW: config.model_low,
+    }[tier]
+    llm = get_llm("conversation", model=model)  # unbound: no tools; same turn tier
     messages = (
         [SystemMessage(content=state["system_prompt"])]
         + state["messages"]

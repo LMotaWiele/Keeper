@@ -280,6 +280,7 @@ class SelfModel:
         context: str,
         internal_state: Any = None,
         outcome: str | None = None,
+        use_rich_summary: bool = True,
     ) -> int | None:
         """
         Record what the system actually did. Stores a self-observation
@@ -295,8 +296,9 @@ class SelfModel:
         self.model["observation_count"] = self.model.get("observation_count", 0) + 1
         count = self.model["observation_count"]
 
-        # Every 5th observation, generate a richer LLM-derived summary
-        if count % 5 == 0 and len(action) > 50:
+        # Every 5th observation, generate a richer LLM-derived summary.
+        # Jev may skip that slot; it must not add extras off the % 5 cadence.
+        if use_rich_summary and count % 5 == 0 and len(action) > 50:
             observation_text = await self._generate_observation_summary(
                 context, action
             )
@@ -415,6 +417,30 @@ class SelfModel:
             previous_model_context=prev_context,
             architecture_context=architecture_context,
         )
+
+        try:
+            from core.jev import jev_should_run
+            compact_claims = {
+                k: self.model.get(k)
+                for k in (
+                    "identity_core",
+                    "behavioral_patterns",
+                    "tensions",
+                    "values",
+                    "capabilities",
+                )
+                if k in self.model
+            }
+            if not await jev_should_run(
+                "observations_warrant_rewrite",
+                {"observations": obs_text[:8000], "claims": compact_claims},
+                background=True,
+                task="self_model_analysis",
+            ):
+                log.info("self_model_analysis skipped — jev observations_warrant_rewrite")
+                return False
+        except Exception:
+            log.debug("self-model Jev gate failed — fail open", exc_info=True)
 
         try:
             from core.json_utils import parse_json_lenient
@@ -556,6 +582,8 @@ class SelfModel:
                 if prev:
                     for key in (
                         "id", "tested", "actionable", "bias_text", "trial_log",
+                        "capability_verified", "capability_note",
+                        "needs_capability_review",
                     ):
                         if key in prev:
                             h[key] = prev[key]

@@ -103,6 +103,10 @@ class MemoryConsolidator:
 
         try:
             from core.loop import companion
+            try:
+                companion.user_life.mark_overdue_missed()
+            except Exception:
+                log.debug("commitment missed-sweep failed", exc_info=True)
             if not companion.api_budget.allows(Tier.LOW, background=True):
                 log.debug("Consolidation LLM skipped — background LOW budget gate")
                 result["skipped"] = True
@@ -190,6 +194,19 @@ class MemoryConsolidator:
             for i, ep in enumerate(episodes)
         )
 
+        try:
+            from core.jev import jev_should_run
+            if not await jev_should_run(
+                "episodes_contain_new_pattern",
+                {"episodes": [str(ep.get("content") or "")[:400] for ep in episodes[:30]]},
+                background=True,
+                task="pattern_extraction",
+            ):
+                log.info("pattern_extraction skipped — jev episodes_contain_new_pattern")
+                return []
+        except Exception:
+            log.debug("pattern_extraction Jev gate failed — fail open", exc_info=True)
+
         prompt = PATTERN_EXTRACTION_PROMPT + episode_text
 
         try:
@@ -227,6 +244,22 @@ class MemoryConsolidator:
 
         if not existing_patterns:
             return []
+
+        try:
+            from core.jev import jev_should_run
+            if not await jev_should_run(
+                "contradicts_existing",
+                {
+                    "existing": [p.get("content", "")[:300] for p in existing_patterns[:12]],
+                    "new": [p.get("content", "")[:300] for p in new_patterns[:12]],
+                },
+                background=True,
+                task="contradiction_check",
+            ):
+                log.info("contradiction_check skipped — jev contradicts_existing")
+                return []
+        except Exception:
+            log.debug("contradiction_check Jev gate failed — fail open", exc_info=True)
 
         existing_text = "\n".join(
             f"- {p['content']} (confidence: {p['confidence']})"

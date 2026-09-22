@@ -69,7 +69,10 @@ class FutureSimulator:
         self, action_description: str, internal_state: Any
     ) -> bool:
         """
-        Quick heuristic: is this action important enough to simulate?
+        Is this action important enough to simulate?
+
+        Jev noul replaces the keyword/affect threshold when available.
+        Fail open to the heuristic if Jev is down.
         """
         importance = 0.3
 
@@ -82,7 +85,26 @@ class FutureSimulator:
         if internal_state and internal_state.arousal > 0.8:
             importance += 0.15
 
-        return importance >= self.IMPORTANCE_THRESHOLD
+        heuristic = importance >= self.IMPORTANCE_THRESHOLD
+        try:
+            from core.jev import jev_decide, noul_allows, spec
+            answers = await jev_decide(
+                {
+                    "action": (action_description or "")[:1500],
+                    "valence": getattr(internal_state, "valence", None),
+                    "arousal": getattr(internal_state, "arousal", None),
+                    "autonomous": "[autonomous]" in (action_description or "").lower(),
+                },
+                {"high_stakes_enough": spec("high_stakes_enough")},
+                background=True,
+                task="future_simulate_gate",
+            )
+            if not answers:
+                return heuristic
+            return noul_allows(answers.get("high_stakes_enough"), 0.50)
+        except Exception:
+            log.debug("should_simulate Jev failed — using heuristic", exc_info=True)
+            return heuristic
 
     async def simulate(
         self,

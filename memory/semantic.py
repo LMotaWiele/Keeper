@@ -132,20 +132,26 @@ class SemanticMemory:
             return doc_id
 
         # New pattern — embed and store
+        from memory.timebind import resolve_event_time
+
         embedding = await self._embed(content)
         source_ids = [str(s) for s in (source_episode_ids or [])]
+        stored_at = utcnow()
+        event_at, event_local_date = resolve_event_time(content, stored_at)
         col.upsert(
             ids=[doc_id],
             embeddings=[embedding],
             documents=[content],
             metadatas=[{
-                "stored_at": utcnow().isoformat(),
+                "stored_at": stored_at.isoformat(),
                 "pattern_type": pattern_type,
                 "confidence": confidence,
                 "source_episode_ids": json.dumps(source_ids),
                 "episode_ids": json.dumps(source_ids),
                 "reinforcement_count": 0,
                 "invalidated": "false",
+                "event_at": event_at.isoformat(),
+                "event_local_date": event_local_date,
                 **(metadata or {}),
             }],
         )
@@ -274,17 +280,45 @@ class SemanticMemory:
 
     # ── Prompt formatting ─────────────────────────────────────────────────
 
-    async def format_for_prompt(self, user_id: int, query: str, n: int = 4) -> str:
+    async def format_for_prompt(
+        self,
+        user_id: int,
+        query: str,
+        n: int = 4,
+        exclude_texts: list[str] | None = None,
+        now: datetime | None = None,
+    ) -> str:
         """Return semantically relevant patterns as a prompt block."""
+        from core.timeutil import memory_time_prefix
+        from memory.timebind import overlaps_any, resolve_event_time
+
         memories = await self.search(user_id, query, n_results=n)
         if not memories:
             return ""
 
+        now = now or utcnow()
+        exclude_texts = list(exclude_texts or [])
         lines = ["## Things I've learned (semantic memory)"]
+        accepted: list[str] = []
         for mem in memories:
+            content = mem["content"]
+            if overlaps_any(content, exclude_texts) or overlaps_any(content, accepted):
+                continue
             conf = mem["confidence"]
             ptype = mem["metadata"].get("pattern_type", "general")
-            lines.append(f"- ({ptype}, confidence {conf:.1f}) {mem['content']}")
+            meta = mem.get("metadata") or {}
+            raw_event = meta.get("event_at") or meta.get("stored_at") or ""
+            try:
+                event_dt = parse_iso(raw_event) if raw_event else now
+            except Exception:
+                event_dt, _ = resolve_event_time(content, now)
+            prefix = memory_time_prefix(event_dt, now)
+            lines.append(
+                f"- ({ptype}, confidence {conf:.1f}) {prefix} {content}"
+            )
+            accepted.append(content)
+        if len(lines) == 1:
+            return ""
         return "\n".join(lines)
 
     # ── Direct access ─────────────────────────────────────────────────────

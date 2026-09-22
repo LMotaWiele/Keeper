@@ -49,7 +49,7 @@ TASK_TIERS: dict[str, Tier] = {
     "completion_check":        Tier.LOW,
     "autonomous_pursuit":      Tier.LOW,
     "action_bias_eval":        Tier.LOW,
-    "action_bias_text":        Tier.MID,
+    "action_bias_text":        Tier.LOW,
 }
 
 # Default sampling per task. Preserve the temperatures already in the code.
@@ -156,28 +156,62 @@ def model_for(task: str) -> str:
     }[tier]
 
 
-def get_llm(task: str, *, json_mode: bool = False, model: str | None = None, **overrides: Any) -> ChatOpenAI:
-    """Construct a budget-tracked chat model for a named task.
+def fallback_model_for(task: str, chosen_model: str) -> str | None:
+    route = _route_for(task, chosen_model)
+    fb = {
+        Tier.LOW: config.model_low_fallback,
+        Tier.MID: config.model_mid_fallback,
+        Tier.HIGH: config.model_high_fallback,
+    }[route]
+    return fb if fb and fb != chosen_model else None
 
-    Optional ``model=`` bypasses ``model_for(task)`` so conversation can
-    degrade HIGH → MID → LOW without a separate task name.
+
+def _route_for(task: str, chosen_model: str) -> Tier:
+    """Route knobs (sort / reasoning) for the model actually used.
+
+    HIGH and MID may share a slug. Non-conversation tasks follow TASK_TIERS
+    so a shared Gemini slug still gets MID ``sort=price``. Conversation
+    degrades HIGH → MID → LOW via ``model=``; when HIGH and MID slugs match,
+    a Gemini turn stays on exacto (tool-call accuracy).
     """
-    if task not in TASK_TIERS:
-        raise ValueError(f"Unregistered LLM task: {task!r}. Add it to TASK_TIERS.")
+    task_tier = TASK_TIERS.get(task, Tier.LOW)
+    if task != "conversation":
+        return task_tier
+    if chosen_model == config.model_low:
+        return Tier.LOW
+    if chosen_model == config.model_mid and config.model_mid != config.model_high:
+        return Tier.MID
+    if chosen_model == config.model_high:
+        return Tier.HIGH
+    if chosen_model == config.model_mid:
+        return Tier.MID
+    return task_tier
 
-    chosen_model = model or model_for(task)
-    params = {**TASK_PARAMS.get(task, {}), **overrides}
-    params.pop("model", None)
 
+def _extra_body_for(route: Tier, json_mode: bool, chosen_model: str) -> dict[str, Any]:
     extra_body: dict[str, Any] = {
         # Report real cost back on every response.
         "usage": {"include": True},
         # Pin the backend so behaviour is reproducible across runs.
-        "provider": {"allow_fallbacks": False},
+        "provider": {
+            "allow_fallbacks": False,
+            "sort": "exacto" if route == Tier.HIGH else "price",
+        },
     }
+    if route == Tier.LOW:
+        # GLM 5.3 Flash rejects reasoning-off ("mandatory for this endpoint").
+        # DeepSeek accepts enabled=false; thinking tokens otherwise bill as output.
+        if "glm" in chosen_model.lower():
+            extra_body["reasoning"] = {"effort": "low"}
+        else:
+            extra_body["reasoning"] = {"enabled": False, "effort": "none"}
     if json_mode:
         extra_body["response_format"] = {"type": "json_object"}
+    return extra_body
 
+
+def _make_chat(task: str, chosen_model: str, params: dict[str, Any], json_mode: bool) -> ChatOpenAI:
+    route = _route_for(task, chosen_model)
     # extra_body is a ChatOpenAI constructor kwarg (langchain-openai >= 0.2).
     # Do not drop it — without usage.include the budget falls through to estimation.
     return ChatOpenAI(
@@ -188,7 +222,41 @@ def get_llm(task: str, *, json_mode: bool = False, model: str | None = None, **o
             "HTTP-Referer": "https://github.com/LMotaWiele/Keeper",
             "X-Title": "Keeper",
         },
-        extra_body=extra_body,
+        extra_body=_extra_body_for(route, json_mode, chosen_model),
         callbacks=[BudgetCallback(task=task, model=chosen_model)],
         **params,
     )
+
+
+def get_llm(
+    task: str,
+    *,
+    json_mode: bool = False,
+    model: str | None = None,
+    wrap_fallback: bool = True,
+    **overrides: Any,
+) -> ChatOpenAI:
+    """Construct a budget-tracked chat model for a named task.
+
+    Optional ``model=`` bypasses ``model_for(task)`` so conversation can
+    degrade HIGH → MID → LOW without a separate task name.
+
+    ``wrap_fallback=False`` returns the primary ChatOpenAI so callers can
+    ``bind_tools`` before attaching the named-slug fallback themselves.
+    """
+    if task not in TASK_TIERS:
+        raise ValueError(f"Unregistered LLM task: {task!r}. Add it to TASK_TIERS.")
+
+    chosen_model = model or model_for(task)
+    params = {**TASK_PARAMS.get(task, {}), **overrides}
+    params.pop("model", None)
+    params.pop("wrap_fallback", None)
+
+    primary = _make_chat(task, chosen_model, params, json_mode)
+    if not wrap_fallback:
+        return primary
+    fb = fallback_model_for(task, chosen_model)
+    if not fb:
+        return primary
+    fallback = _make_chat(task, fb, params, json_mode)
+    return primary.with_fallbacks([fallback])

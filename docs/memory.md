@@ -4,13 +4,14 @@ Three stores plus a consolidator. The agent talks to `memory.memory_system`; it 
 
 ## Working (`memory/working.py`)
 
-Per-user list, default capacity 20 (`WORKING_MEMORY_CAPACITY`). Each item has a role, text, salience, and timestamp.
+Two rings, default total 20 (`WORKING_MEMORY_CAPACITY` = `DIALOGUE_WINDOW` 12 + `PIN_CAPACITY` 8).
 
-When the buffer is full, the **lowest-salience** item is evicted. User turns default higher than assistant turns. `boost()` raises salience if something is referenced again; `decay()` slowly lowers everything so unused context fades.
+- **Dialogue ring** — last 12 messages, chronological. Never salience-evicted. Assistant replies stay here even at salience 0.5.
+- **Pins** — up to 8 older high-salience *user* turns that do not overlap the dialogue ring. `decay()` runs on session end and on the consolidator idle tick. Pins older than `PIN_MAX_AGE_DAYS` (14) with no recent use are dropped. Session timeout does **not** wipe the dialogue ring.
 
-Persisted to `data/state/working_memory.json` so a process restart keeps the thread.
+Each LangChain message is prefixed with user-local time (`[2026-09-07 16:39 CEST]`; pins: `[earlier · 2026-09-07 CEST]`).
 
-The runner sends this window to LangGraph as the conversation transcript. Episodic/semantic content is *not* duplicated there; it lives in the system prompt.
+Persisted to `data/state/working_memory.json`. Episodic/semantic content is de-duped against this window before it enters the system prompt. See `docs/context-time-spec.md`.
 
 ## Episodic (`memory/episodic.py`)
 
@@ -21,8 +22,9 @@ Encoding stores:
 - `importance` — caller-supplied salience
 - `emotional_weight` — from internal state at write time
 - `decay_rate` — slower when emotional weight is high
-- `recall_count` / `last_recalled_at` — remembering reinforces
+- `recall_count` / `last_recalled_at` — remembering reinforces (explicit `recall_facts` / tools, **not** automatic prompt injection)
 - `effective_strength` — retrieval rank
+- `event_at` / `event_local_date` — absolute time of the referred event (`USER_TIMEZONE`). Relative phrases in `content` are left as written; display prefixes `[2026-09-06 CEST · 12d ago]`.
 
 Decay formula (applied on a schedule):
 
@@ -35,7 +37,9 @@ effective_strength = clamp(base × recency + recall_bonus)
 
 `forget()` deletes rows below 0.05. That is intentional identity shaping, not a vacuum-cleaner bug.
 
-Recall of facts/preferences also increments `recall_count`, so frequently used facts resist decay.
+`recall_facts` increments `recall_count`, so explicitly retrieved facts resist decay. Prompt assembly only bumps `used_count`.
+
+`format_for_prompt` prefers facts/preferences, drops `User said:` / `Responded:` / `self_observation` lines that overlap the working-memory window, and caps self-observations at 2.
 
 Types: `summary`, `fact`, `event`, `preference`, `note`, `self_observation`, `opinion`, `research`.
 

@@ -50,7 +50,7 @@ Python 3.11+ · LangGraph · OpenRouter (`ChatOpenAI`) · ChromaDB · SQLite · 
 
 ## Prerequisites
 
-1. **OpenRouter API key** (`OPENROUTER_API_KEY`). All chat models are reached through `https://openrouter.ai/api/v1`. Defaults: `MODEL_HIGH=x-ai/grok-4.6`, `MODEL_MID=google/gemini-3.7-flash`, `MODEL_LOW=deepseek/deepseek-v4-flash-0731`.
+1. **OpenRouter API key** (`OPENROUTER_API_KEY`). All chat models are reached through `https://openrouter.ai/api/v1`. Defaults: `MODEL_HIGH=google/gemini-3.8-flash`, `MODEL_MID=google/gemini-3.8-flash`, `MODEL_LOW=z-ai/glm-5.3-flash` (LOW fallback `~deepseek/deepseek-flash-latest`). Typed skip-gates use the Decisions API (`JEV_MODEL=~typesafe/jev-latest`).
 2. **Telegram bot token** and your user id (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`).
 3. **A local SearXNG instance** for web search. Default query URL: `http://localhost:8081/search?q=<query>`.
 

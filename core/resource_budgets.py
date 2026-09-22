@@ -14,12 +14,15 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# USD per token. Placeholders for grok-4.6 / deepseek-v4-flash — overwritten
-# at startup from OpenRouter's /models if reachable (see refresh_model_pricing).
+# USD per token. Placeholders — overwritten at startup from OpenRouter's
+# /models if reachable (see refresh_model_pricing).
 MODEL_PRICING: dict[str, tuple[float, float]] = {
     "x-ai/grok-4.6":                   (5.00 / 1e6, 15.00 / 1e6),
+    "google/gemini-3.8-flash":         (0.75 / 1e6,  3.75 / 1e6),
     "google/gemini-3.7-flash":         (0.75 / 1e6,  3.75 / 1e6),
-    "deepseek/deepseek-v4-flash-0731": (0.30 / 1e6,  0.90 / 1e6),
+    "z-ai/glm-5.3-flash":              (0.075 / 1e6, 0.25 / 1e6),
+    "~deepseek/deepseek-flash-latest": (0.15 / 1e6,  0.60 / 1e6),
+    "~typesafe/jev-latest":            (0.042 / 1e6, 0.00),
 }
 DEFAULT_PRICING = (1.00 / 1e6, 3.00 / 1e6)
 

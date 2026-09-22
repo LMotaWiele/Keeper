@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -137,6 +138,8 @@ class ConsciousArchitecture:
         self._started = False
         self._session_active: dict[int, bool] = {}
         self._save_lock = asyncio.Lock()
+        self._current_user_id: int | None = None
+        self._current_turn_episode_id: dict[int, str] = {}
         self.environment.on_session_end_cb = self._on_env_session_end
 
     # ── Session query (for background processes) ──────────────────────────
@@ -145,6 +148,11 @@ class ConsciousArchitecture:
         """TimeStream timeout ended a session — unblock background loops."""
         self._session_active[user_id] = False
         self.state.session_id = None
+        self.user_life.on_session_end()
+        try:
+            self.memory.working.on_session_end(user_id)
+        except Exception:
+            log.debug("working-memory session-end prune failed", exc_info=True)
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._save_state())
@@ -178,6 +186,9 @@ class ConsciousArchitecture:
 
         # 1. Init memory stores
         await self.memory.init()
+        self.user_life.ensure_schema()
+        from core.action_bias import void_capability_absent_trials
+        void_capability_absent_trials()
 
         # 2. Load persisted state
         state_dir = _state_dir()
@@ -423,11 +434,13 @@ class ConsciousArchitecture:
         Process one user message through all five pillars.
         Returns a context dict for the LangGraph agent.
         """
+        self._current_user_id = user_id
         if not self._session_active.get(user_id, False):
             self._session_active[user_id] = True
             import uuid as _uuid
             self.state.session_id = str(_uuid.uuid4())
             self.environment.on_session_start(user_id)
+            self.user_life.on_session_start(self.state.session_id)
 
         self.environment.on_user_message(user_id)
 
@@ -443,7 +456,7 @@ class ConsciousArchitecture:
 
         self.memory.store_working(user_id, "user", user_text, salience=0.7 + novelty * 0.3)
 
-        await self.memory.store_episode(
+        episode_id = await self.memory.store_episode(
             user_id=user_id,
             content=f"User said: {user_text}",
             internal_state=self.state,
@@ -452,6 +465,7 @@ class ConsciousArchitecture:
             tags=["user_input"],
             source="user_turn",
         )
+        self._current_turn_episode_id[user_id] = episode_id
 
         context = await self.build_context(user_id, user_text)
 
@@ -502,21 +516,58 @@ class ConsciousArchitecture:
         )
 
         if not degraded:
+            stance_run = True
+            rich_ok = True
+            try:
+                from core.jev import SKIP_BELOW, jev_decide, noul_allows, spec
+                next_count = self.self_model.model.get("observation_count", 0) + 1
+                summary_slot = next_count % 5 == 0 and len(response_text) > 50
+                questions = {"stance_present": spec("stance_present")}
+                if summary_slot:
+                    questions["worth_rich_observation"] = spec("worth_rich_observation")
+                answers = await jev_decide(
+                    {
+                        "user_text": user_text[:2000],
+                        "response_text": response_text[:4000],
+                    },
+                    questions,
+                    background=False,
+                    task="post_turn_gates",
+                )
+                if answers:
+                    stance_run = noul_allows(
+                        answers.get("stance_present"),
+                        SKIP_BELOW["stance_present"],
+                    )
+                    if summary_slot:
+                        # Until calibrated, Jev may only skip the 5th slot,
+                        # never add extra rich-summary calls.
+                        rich_ok = noul_allows(
+                            answers.get("worth_rich_observation"),
+                            SKIP_BELOW["worth_rich_observation"],
+                        )
+            except Exception:
+                log.debug("post-turn Jev gates failed — fail open", exc_info=True)
+
             await self.self_model.observe(
                 user_id=user_id,
                 action=response_text[:500],
                 context=user_text[:300],
                 internal_state=self.state,
+                use_rich_summary=rich_ok,
             )
 
-            try:
-                await self.self_model.opinions.detect_opinions(
-                    user_id=user_id,
-                    user_message=user_text,
-                    system_response=response_text,
-                )
-            except Exception:
-                log.debug("Opinion detection failed", exc_info=True)
+            if stance_run:
+                try:
+                    await self.self_model.opinions.detect_opinions(
+                        user_id=user_id,
+                        user_message=user_text,
+                        system_response=response_text,
+                    )
+                except Exception:
+                    log.debug("Opinion detection failed", exc_info=True)
+            else:
+                log.debug("opinion_detection skipped — jev stance_present")
 
         try:
             updates = await self.goals.check_completions(self, user_id)
@@ -534,8 +585,9 @@ class ConsciousArchitecture:
         Build the rich context dict that gets injected into the
         LangGraph agent's system prompt.
         """
-        memory_context = await self.memory.build_memory_context(user_id, user_text)
+        memory_context, mem_stats = await self.memory.build_memory_context(user_id, user_text)
         messages = self.memory.working.to_langchain_messages(user_id)
+        dialogue, pins = self.memory.working.split_window(user_id)
 
         blocks: list[tuple[str, str]] = []
 
@@ -592,9 +644,13 @@ class ConsciousArchitecture:
         blocks.append((
             "tool_instructions",
             "\n---\n"
-            "You have tools: web_search, memory management, and introspection\n"
+            "You have tools: web_search, memory management, user-life tracking\n"
+            "(record_user_commitment, update_commitment_status,\n"
+            "get_active_commitments, log_wellbeing_snapshot), and introspection\n"
             "(codebase_overview, codebase_list_modules, codebase_read_module,\n"
             "self_theorize, simulate_action, list_opinions, goal_status).\n"
+            "When the user commits to doing something, record it with their own\n"
+            "words as evidence — do not lecture about the commitment instead.\n"
             "\n"
             "Search the web before agreeing with a factual or contestable claim in a\n"
             "domain where you hold no externally-grounded opinion. Check list_opinions\n"
@@ -603,6 +659,9 @@ class ConsciousArchitecture:
             "it is you having no position of your own.\n"
             "\n"
             "Use memory tools proactively; your future self depends on them.\n"
+            "Do not recap standing user-life facts (housing, commission, income)\n"
+            "unless the user asked or the fact changed this turn. Do not restate\n"
+            "numbered plans from your previous reply.\n"
             "Reply naturally, as a companion would.",
         ))
 
@@ -630,6 +689,19 @@ class ConsciousArchitecture:
             self.state.fatigue,
             self.state.processing_mode,
             [name for name, _ in blocks],
+        )
+        mem_hash = hashlib.sha256((memory_context or "").encode()).hexdigest()[:8]
+        log.info(
+            "PROMPT overlap: wm=%d dialogue=%d pins=%d ep_in=%s ep_kept=%s "
+            "dropped_overlap=%s mem_hash=%s wm_span_h=%.1f",
+            self.memory.working.size(user_id),
+            len(dialogue),
+            len(pins),
+            mem_stats.get("ep_in", 0),
+            mem_stats.get("ep_kept", 0),
+            mem_stats.get("dropped_overlap", 0),
+            mem_hash,
+            self.memory.working.span_hours(user_id),
         )
 
         return {
@@ -682,6 +754,7 @@ class ConsciousArchitecture:
         self.memory.clear_working(user_id)
         self._novelty.clear(user_id)
         self._session_active[user_id] = False
+        self.user_life.on_session_end()
 
     # ── Status ────────────────────────────────────────────────────────────
 

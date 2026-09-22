@@ -427,6 +427,23 @@ class GoalSystem:
             active_goals=active_text,
         )
 
+        try:
+            from core.jev import jev_should_run
+            if not await jev_should_run(
+                "new_instrumental_warranted",
+                {
+                    "active_titles": [g.name for g in self.active_instrumental],
+                    "drives": drives_context,
+                    "memory": memory_context[:2000],
+                },
+                background=True,
+                task="goal_generation",
+            ):
+                log.info("goal_generation skipped — jev new_instrumental_warranted")
+                return []
+        except Exception:
+            log.debug("goal_generation Jev gate failed — fail open", exc_info=True)
+
         new_goals = []
         try:
             from core.json_utils import parse_json_lenient

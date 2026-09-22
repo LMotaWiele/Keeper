@@ -396,6 +396,7 @@ class OpinionRegistry:
             return 0
 
         reviewed = 0
+        candidates: list[tuple[Any, str]] = []
 
         for opinion in list(self.opinions.values()):
             if opinion.conviction < 0.1:
@@ -425,12 +426,60 @@ class OpinionRegistry:
             if not related:
                 continue
 
-            # Ask the LLM to evaluate
             context_text = "\n".join(
                 f"- {m.get('content', '')[:200]}"
                 for m in related[:5]
             )
+            candidates.append((opinion, context_text))
 
+        run_ids = {op.id for op, _ in candidates}
+        if candidates:
+            try:
+                from core.jev import SKIP_BELOW, jev_decide, noul_allows, spec
+                questions = {}
+                state_ops = []
+                for op, ctx in candidates:
+                    qid = f"op_{op.id}"
+                    questions[qid] = spec(
+                        "new_evidence_for_opinion",
+                        instructions=(
+                            "Is there new evidence that should change the "
+                            f"opinion on '{op.domain}' (position: "
+                            f"{(op.position or '')[:200]})?"
+                        ),
+                    )
+                    state_ops.append({
+                        "id": op.id,
+                        "domain": op.domain,
+                        "position": op.position,
+                        "conviction": op.conviction,
+                        "new_context": ctx,
+                    })
+                answers = await jev_decide(
+                    {"opinions": state_ops},
+                    questions,
+                    background=True,
+                    task="opinion_review",
+                )
+                if answers:
+                    threshold = SKIP_BELOW["new_evidence_for_opinion"]
+                    run_ids = {
+                        op.id
+                        for op, _ in candidates
+                        if noul_allows(answers.get(f"op_{op.id}"), threshold)
+                    }
+            except Exception:
+                log.debug("opinion_review Jev gate failed — fail open", exc_info=True)
+
+        for opinion, context_text in candidates:
+            if opinion.id not in run_ids:
+                log.debug(
+                    "opinion_review skipped — jev new_evidence_for_opinion id=%s",
+                    opinion.id,
+                )
+                continue
+
+            # Ask the LLM to evaluate
             prompt = OPINION_REVIEW_PROMPT.format(
                 domain=opinion.domain,
                 position=opinion.position,

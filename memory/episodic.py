@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS episodes (
     episode_id        TEXT,
     source            TEXT    DEFAULT 'user_turn',
     novelty           REAL    DEFAULT 1.0,
-    used_count        INTEGER DEFAULT 0
+    used_count        INTEGER DEFAULT 0,
+    event_at          TEXT,
+    event_local_date  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_ep_user       ON episodes(user_id);
@@ -91,6 +93,29 @@ CREATE TABLE IF NOT EXISTS action_bias_trial (
     verdict       TEXT,
     reason        TEXT,
     evaluated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS user_commitment (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    text              TEXT    NOT NULL,
+    evidence          TEXT    NOT NULL,
+    created_at        TEXT    NOT NULL,
+    deadline          TEXT,
+    deadline_raw      TEXT,
+    status            TEXT    NOT NULL DEFAULT 'active',
+    closed_at         TEXT,
+    close_note        TEXT,
+    source_episode_id TEXT,
+    last_surfaced_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wellbeing_snapshot (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           TEXT  NOT NULL,
+    score        REAL  NOT NULL,
+    source       TEXT  NOT NULL,
+    evidence     TEXT  NOT NULL,
+    note         TEXT
 );
 """
 
@@ -152,6 +177,8 @@ class EpisodicMemory:
                 "ALTER TABLE episodes ADD COLUMN source TEXT DEFAULT 'user_turn'",
                 "ALTER TABLE episodes ADD COLUMN novelty REAL DEFAULT 1.0",
                 "ALTER TABLE episodes ADD COLUMN used_count INTEGER DEFAULT 0",
+                "ALTER TABLE episodes ADD COLUMN event_at TEXT",
+                "ALTER TABLE episodes ADD COLUMN event_local_date TEXT",
             ):
                 try:
                     await db.execute(stmt)
@@ -171,6 +198,7 @@ class EpisodicMemory:
                     (str(uuid.uuid4()), row_id),
                 )
             await db.commit()
+        await self.backfill_event_times()
 
     # ── Store ─────────────────────────────────────────────────────────────
 
@@ -187,14 +215,25 @@ class EpisodicMemory:
         expires_at: datetime | None = None,
         source: str = "user_turn",
         episode_id: str | None = None,
+        created_at: datetime | str | None = None,
     ) -> str:
         """
         Store a new episode. Returns the stable UUID episode_id.
         Novelty is embedding distance to the nearest existing episode.
+        Content is stored unchanged; event_at binds relative time.
         """
+        from memory.timebind import resolve_event_time
+
         decay_rate = 0.02 * (1.0 - emotional_weight * 0.8)
         eid = episode_id or str(uuid.uuid4())
-        created_at = _now_iso()
+        if created_at is None:
+            created_dt = utcnow()
+        elif isinstance(created_at, datetime):
+            created_dt = created_at
+        else:
+            created_dt = parse_iso(str(created_at))
+        created_iso = created_dt.isoformat()
+        event_at, event_local_date = resolve_event_time(content, created_dt)
         novelty = await self._compute_novelty(user_id, content)
 
         async with aiosqlite.connect(self.db_path) as db:
@@ -203,8 +242,9 @@ class EpisodicMemory:
                    (user_id, type, content, tags, importance,
                     emotional_weight, state_snapshot, decay_rate,
                     recall_count, used_count, effective_strength, associations,
-                    created_at, expires_at, episode_id, source, novelty)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1.0, ?, ?, ?, ?, ?, ?)""",
+                    created_at, expires_at, episode_id, source, novelty,
+                    event_at, event_local_date)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1.0, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id,
                     type,
@@ -215,11 +255,13 @@ class EpisodicMemory:
                     json.dumps(state_snapshot or {}),
                     decay_rate,
                     json.dumps(associations or []),
-                    created_at,
+                    created_iso,
                     expires_at.isoformat() if expires_at else None,
                     eid,
                     source,
                     novelty,
+                    event_at.isoformat(),
+                    event_local_date,
                 ),
             )
 
@@ -233,7 +275,7 @@ class EpisodicMemory:
             user_id=user_id,
             episode_id=eid,
             content=content,
-            created_at=created_at,
+            created_at=created_iso,
             source=source,
             novelty=novelty,
         )
@@ -435,30 +477,135 @@ class EpisodicMemory:
 
     # ── Prompt formatting ─────────────────────────────────────────────────
 
-    async def format_for_prompt(self, user_id: int) -> tuple[str, list[str], list[str]]:
-        """Return (block, recalled_ids, used_ids). Truncates to the char budget."""
-        episodes = await self.recall(user_id, limit=15)
-        if not episodes:
-            return "", [], []
+    def _event_fields(self, ep: dict, now: datetime | None = None) -> tuple[datetime, str]:
+        """Resolve event_at for display; fall back to created_at + deixis."""
+        from core.timeutil import memory_time_prefix
+        from memory.timebind import resolve_event_time
 
-        recalled = [ep.get("episode_id") or str(ep["id"]) for ep in episodes]
+        raw = ep.get("event_at")
+        created = ep.get("created_at")
+        try:
+            created_dt = parse_iso(created) if created else utcnow()
+        except Exception:
+            created_dt = utcnow()
+        if raw:
+            try:
+                event_dt = parse_iso(raw)
+            except Exception:
+                event_dt, _ = resolve_event_time(ep.get("content") or "", created_dt)
+        else:
+            event_dt, _ = resolve_event_time(ep.get("content") or "", created_dt)
+        return event_dt, memory_time_prefix(event_dt, now)
+
+    async def backfill_event_times(self) -> int:
+        """Fill event_at / event_local_date on rows that lack them. No content rewrite."""
+        from memory.timebind import resolve_event_time
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT id, content, created_at FROM episodes "
+                "WHERE event_at IS NULL OR event_at = '' OR event_local_date IS NULL"
+            ) as cur:
+                rows = await cur.fetchall()
+            updated = 0
+            for row in rows:
+                try:
+                    created_dt = parse_iso(row["created_at"])
+                except Exception:
+                    continue
+                event_at, event_local_date = resolve_event_time(
+                    row["content"] or "", created_dt
+                )
+                await db.execute(
+                    "UPDATE episodes SET event_at = ?, event_local_date = ? WHERE id = ?",
+                    (event_at.isoformat(), event_local_date, row["id"]),
+                )
+                updated += 1
+            await db.commit()
+        return updated
+
+    async def format_for_prompt(
+        self,
+        user_id: int,
+        exclude_texts: list[str] | None = None,
+        now: datetime | None = None,
+    ) -> tuple[str, list[str], dict]:
+        """Return (block, used_ids, stats). Prefers facts; de-dupes against the transcript."""
+        from memory.timebind import is_transcript_echo, overlaps_any
+
+        now = now or utcnow()
+        exclude_texts = list(exclude_texts or [])
+        episodes = await self.recall(user_id, limit=40)
+        stats = {
+            "ep_in": len(episodes),
+            "ep_kept": 0,
+            "dropped_overlap": 0,
+            "dropped_self_obs": 0,
+        }
+        if not episodes:
+            return "", [], stats
+
+        type_rank = {
+            "fact": 0,
+            "preference": 1,
+            "summary": 2,
+            "note": 3,
+            "opinion": 4,
+            "research": 5,
+            "event": 6,
+            "self_observation": 7,
+        }
+
+        def _rank(ep: dict) -> tuple:
+            content = ep.get("content") or ""
+            echo = 1 if is_transcript_echo(content, ep.get("type")) else 0
+            return (
+                type_rank.get(ep.get("type") or "", 9),
+                echo,
+                -float(ep.get("effective_strength") or 0),
+            )
+
+        episodes = sorted(episodes, key=_rank)
         lines = ["## What I remember about you"]
         used: list[str] = []
+        accepted: list[str] = []
+        self_obs = 0
         budget = config.FORGET_PROMPT_CHAR_BUDGET
+
         for ep in episodes:
-            tags = json.loads(ep["tags"] or "[]")
+            tags = json.loads(ep["tags"] or "[]") if isinstance(ep.get("tags"), str) else (ep.get("tags") or [])
             if "degraded" in tags:
+                continue
+            content = ep.get("content") or ""
+            ep_type = ep.get("type") or "event"
+            if ep_type == "self_observation" and self_obs >= 2:
+                stats["dropped_self_obs"] += 1
+                continue
+            if overlaps_any(content, accepted):
+                stats["dropped_overlap"] += 1
+                continue
+            if is_transcript_echo(content, ep_type) and overlaps_any(content, exclude_texts):
+                stats["dropped_overlap"] += 1
                 continue
             tag_str = f" [{', '.join(tags)}]" if tags else ""
             strength = ep.get("effective_strength", 1.0)
             fade = "" if strength > 0.5 else " (fading)"
-            line = f"- [{ep['type']}]{tag_str} {ep['content']}{fade}"
+            _, prefix = self._event_fields(ep, now)
+            line = f"- [{ep_type}]{tag_str} {prefix} {content}{fade}"
             candidate = "\n".join(lines + [line])
             if used and len(candidate) > budget:
                 break
             lines.append(line)
             used.append(ep.get("episode_id") or str(ep["id"]))
-        return "\n".join(lines), recalled, used
+            accepted.append(content)
+            if ep_type == "self_observation":
+                self_obs += 1
+
+        stats["ep_kept"] = len(used)
+        if len(lines) == 1:
+            return "", [], stats
+        return "\n".join(lines), used, stats
 
     async def _compute_novelty(self, user_id: int, content: str) -> float:
         """Cosine distance to nearest existing episode. 1.0 if the store is empty."""

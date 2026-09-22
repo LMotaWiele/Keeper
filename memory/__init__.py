@@ -154,29 +154,42 @@ class MemorySystem:
 
     async def consolidate(self, user_id: int, since_hours: int = 24) -> dict:
         """Run one consolidation cycle: extract patterns + apply decay."""
+        self.working.idle_tick(user_id)
         return await self.consolidator.run_cycle(user_id, since_hours)
 
     # ── Prompt building ───────────────────────────────────────────────────
 
-    async def build_memory_context(self, user_id: int, query: str) -> str:
+    async def build_memory_context(
+        self,
+        user_id: int,
+        query: str,
+        now: datetime | None = None,
+    ) -> tuple[str, dict]:
         """
         Build a complete memory context block for the system prompt.
-        Combines all three layers into a coherent narrative.
+        Combines episodic + semantic. Does not bump recall_count.
         """
         parts = []
-        recalled: list[str] = []
-        used: list[str] = []
-
-        ep_block, recalled, used = await self.episodic.format_for_prompt(user_id)
+        exclude = [item.content for item in self.working.get_items(user_id)]
+        ep_block, used, stats = await self.episodic.format_for_prompt(
+            user_id, exclude_texts=exclude, now=now,
+        )
         if ep_block:
             parts.append(ep_block)
 
-        sem_block = await self.semantic.format_for_prompt(user_id, query)
+        sem_block = await self.semantic.format_for_prompt(
+            user_id, query, exclude_texts=exclude, now=now,
+        )
         if sem_block:
             parts.append(sem_block)
 
-        await self.episodic.increment_counters(recalled, used)
-        return "\n\n".join(parts) if parts else ""
+        # Injection is not recall — only used_count moves.
+        if used:
+            await self.episodic.increment_counters([], used)
+        text = "\n\n".join(parts) if parts else ""
+        stats = dict(stats)
+        stats["mem_chars"] = len(text)
+        return text, stats
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 

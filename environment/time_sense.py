@@ -6,7 +6,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from core.timeutil import utcnow, parse_iso
+from core.timeutil import as_utc, local_now, parse_iso, to_user_local, utcnow
 from pathlib import Path
 from typing import Any
 
@@ -266,13 +266,18 @@ class TimeSense:
 
     # ── Prompt context ────────────────────────────────────────────────────
 
-    def to_prompt_context(self) -> str:
+    def to_prompt_context(self, now: datetime | None = None) -> str:
         """Temporal awareness block for the system prompt."""
         parts = []
 
-        # Time of day
-        now = utcnow()
-        parts.append(f"It's {now.strftime('%A')} {now.strftime('%H:%M')} UTC, {self._time_of_day()}")
+        now = now or utcnow()
+        local = local_now(now)
+        utc = as_utc(now)
+        tzname = local.tzname() or "UTC"
+        parts.append(
+            f"It's {local.strftime('%A')} {local.strftime('%H:%M')} {tzname} "
+            f"({utc.strftime('%H:%M')} UTC), {self._time_of_day(now)}"
+        )
 
         # Session gap
         subjective = self.subjective_time_since_last
@@ -299,8 +304,8 @@ class TimeSense:
 
         return " | ".join(parts)
 
-    def _time_of_day(self) -> str:
-        hour = utcnow().hour
+    def _time_of_day(self, now: datetime | None = None) -> str:
+        hour = to_user_local(now or utcnow()).hour
         if hour < 6:
             return "late night"
         elif hour < 12:

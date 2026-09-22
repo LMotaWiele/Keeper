@@ -16,6 +16,19 @@ log = logging.getLogger(__name__)
 
 _pending_eval_tasks: set[asyncio.Task] = set()
 
+# Trials against the user-life-coaching hypothesis ran while no user_life
+# tool was bound. VOID is permanent; never overwrite, never count in streaks.
+USER_LIFE_HYPOTHESIS_IDS = (
+    "h-v51-02",  # lecture vs log commitment (exact)
+    "h-v56-01",  # user life-tracking; trial 11
+    "h-v57-01",  # invoking structured state tracking tools
+    "h-v58-01",  # current: tracking/self-improvement without tool invocations
+)
+VOID_CAPABILITY_REASON = "capability absent: no user_life tool bound at trial time"
+# Trials after this instant can be real tests — the tools exist.
+VOID_BEFORE_TS = "2026-09-10T13:00:00+00:00"
+_SKIP_STREAK = {"INVALID", "VOID", None}
+
 TRIAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS action_bias_trial (
     trial_id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,6 +87,9 @@ def ensure_hypothesis_fields(hypotheses: list[dict], version: int = 0) -> list[d
         h.setdefault("actionable", None)
         h.setdefault("bias_text", None)
         h.setdefault("trial_log", [])
+        h.setdefault("capability_verified", False)
+        h.setdefault("capability_note", None)
+        h.setdefault("needs_capability_review", False)
         out.append(h)
     return out
 
@@ -81,7 +97,9 @@ def ensure_hypothesis_fields(hypotheses: list[dict], version: int = 0) -> list[d
 def eligible_hypotheses(hypotheses: list[dict]) -> list[dict]:
     return [
         h for h in hypotheses
-        if not h.get("tested") and h.get("actionable") is not False
+        if not h.get("tested")
+        and h.get("actionable") is not False
+        and not h.get("needs_capability_review")
     ]
 
 
@@ -106,10 +124,37 @@ def select_sticky(model: dict) -> dict | None:
     return chosen
 
 
+def _usable_bias_text(text: str) -> bool:
+    """Reject prompt-echo fragments. Do not loosen the verdict parser."""
+    cleaned = (text or "").strip()
+    if len(cleaned) < 40:
+        return False
+    prompt_l = BIAS_TEXT_PROMPT.lower()
+    if cleaned.lower() in prompt_l:
+        return False
+    # First-line debris like "ONLY the sentence." / "reply alone (no extra context"
+    for line in BIAS_TEXT_PROMPT.splitlines():
+        line = line.strip()
+        if len(line) >= 12 and line.lower() in cleaned.lower() and len(cleaned) < 80:
+            return False
+    return True
+
+
+def _extract_bias_sentence(raw: str) -> str:
+    lines = [ln.strip().strip('"').strip("'") for ln in (raw or "").splitlines()]
+    lines = [ln for ln in lines if ln]
+    if not lines:
+        return ""
+    usable = [ln for ln in lines if _usable_bias_text(ln)]
+    if usable:
+        return max(usable, key=len)
+    return max(lines, key=len)
+
+
 async def ensure_bias_text(hypothesis: dict) -> str:
     """Generate bias_text once; never overwrite a hand-edited value."""
     existing = hypothesis.get("bias_text")
-    if existing:
+    if existing and _usable_bias_text(str(existing)):
         return str(existing)
     from core.llm import get_llm
     prompt = BIAS_TEXT_PROMPT.format(
@@ -117,9 +162,10 @@ async def ensure_bias_text(hypothesis: dict) -> str:
         action_bias=hypothesis.get("action_bias") or "",
     )
     result = await get_llm("action_bias_text").ainvoke([HumanMessage(content=prompt)])
-    text = (getattr(result, "content", None) or "").strip().splitlines()[0].strip()
-    if not text:
-        text = str(hypothesis.get("action_bias") or hypothesis.get("statement") or "")
+    text = _extract_bias_sentence(getattr(result, "content", None) or "")
+    if not _usable_bias_text(text):
+        fallback = str(hypothesis.get("action_bias") or hypothesis.get("statement") or "")
+        text = fallback if _usable_bias_text(fallback) else fallback
     hypothesis["bias_text"] = text
     return text
 
@@ -176,7 +222,7 @@ def _consecutive_verdicts(trial_log: list[dict], wanted: str) -> int:
     n = 0
     for entry in reversed(trial_log):
         v = entry.get("verdict")
-        if v == "INVALID" or v is None:
+        if v in _SKIP_STREAK:
             continue
         if v == wanted:
             n += 1
@@ -196,7 +242,7 @@ def apply_verdict(model: dict, hypothesis_id: str, trial_id: int, verdict: str) 
         "ts": utcnow().isoformat(),
     }
     hyp.setdefault("trial_log", []).append(log_entry)
-    if verdict == "INVALID":
+    if verdict in _SKIP_STREAK:
         return
     held = _consecutive_verdicts(hyp["trial_log"], "HELD")
     violated = _consecutive_verdicts(hyp["trial_log"], "VIOLATED")
@@ -228,6 +274,16 @@ def apply_verdict(model: dict, hypothesis_id: str, trial_id: int, verdict: str) 
             model["active_bias_hypothesis_id"] = None
         log.info("action_bias HELD streak — hypothesis %s actionable=true", hypothesis_id)
     elif violated >= need:
+        if not hyp.get("capability_verified"):
+            hyp["needs_capability_review"] = True
+            if model.get("active_bias_hypothesis_id") == hypothesis_id:
+                model["active_bias_hypothesis_id"] = None
+            log.info(
+                "action_bias VIOLATED streak — hypothesis %s needs_capability_review "
+                "(capability_verified is false; not writing actionable=false)",
+                hypothesis_id,
+            )
+            return
         hyp["tested"] = True
         hyp["actionable"] = False
         if model.get("active_bias_hypothesis_id") == hypothesis_id:
@@ -238,13 +294,46 @@ def apply_verdict(model: dict, hypothesis_id: str, trial_id: int, verdict: str) 
 def write_trial_verdict(trial_id: int, verdict: str, reason: str) -> None:
     conn = _db()
     try:
+        row = conn.execute(
+            "SELECT verdict FROM action_bias_trial WHERE trial_id = ?",
+            (trial_id,),
+        ).fetchone()
+        if row and row[0] == "VOID":
+            return
         conn.execute(
             """UPDATE action_bias_trial
                SET verdict = ?, reason = ?, evaluated_at = ?
-               WHERE trial_id = ?""",
+               WHERE trial_id = ? AND (verdict IS NULL OR verdict != 'VOID')""",
             (verdict, reason, utcnow().isoformat(), trial_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def void_capability_absent_trials(
+    hypothesis_ids: tuple[str, ...] = USER_LIFE_HYPOTHESIS_IDS,
+    before_ts: str = VOID_BEFORE_TS,
+) -> int:
+    """Mark trials that tested a capability that did not exist. Idempotent."""
+    if not hypothesis_ids:
+        return 0
+    conn = _db()
+    try:
+        ph = ",".join("?" for _ in hypothesis_ids)
+        cur = conn.execute(
+            f"""UPDATE action_bias_trial
+                SET verdict = 'VOID', reason = ?
+                WHERE hypothesis_id IN ({ph})
+                  AND ts < ?
+                  AND (verdict IS NULL OR verdict != 'VOID')""",
+            (VOID_CAPABILITY_REASON, *hypothesis_ids, before_ts),
+        )
+        conn.commit()
+        n = int(cur.rowcount or 0)
+        if n:
+            log.info("voided %d action_bias trials for capability-absent hypotheses", n)
+        return n
     finally:
         conn.close()
 
@@ -265,25 +354,38 @@ def trial_eligible_after_reply(
 
 
 async def _evaluate(trial_id: int, bias_text: str, response_text: str, hypothesis_id: str) -> None:
+    from core.jev import JEV_SPECS, jev_decide, verdict_from_noul
     from core.llm import get_llm
     from core.loop import companion
 
     verdict, reason = "INVALID", "eval failed"
     try:
-        llm = get_llm(
-            "action_bias_eval",
-            model=config.ACTION_BIAS_EVAL_MODEL,
-            temperature=0,
-            max_tokens=60,
+        answers = await jev_decide(
+            {"bias_text": bias_text, "response_text": response_text[:4000]},
+            {"followed_instruction": dict(JEV_SPECS["followed_instruction"])},
+            background=False,
+            task="action_bias_eval",
         )
-        result = await llm.ainvoke([
-            HumanMessage(content=EVAL_PROMPT.format(
-                bias_text=bias_text,
-                response_text=response_text[:4000],
-            )),
-        ])
-        raw = getattr(result, "content", "") or ""
-        verdict, reason = _parse_verdict(raw)
+        noul = None
+        if answers and answers.get("followed_instruction") is not None:
+            noul = answers["followed_instruction"].noul
+        if noul is not None:
+            verdict, reason = verdict_from_noul(noul)
+        else:
+            llm = get_llm(
+                "action_bias_eval",
+                model=config.ACTION_BIAS_EVAL_MODEL,
+                temperature=0,
+                max_tokens=60,
+            )
+            result = await llm.ainvoke([
+                HumanMessage(content=EVAL_PROMPT.format(
+                    bias_text=bias_text,
+                    response_text=response_text[:4000],
+                )),
+            ])
+            raw = getattr(result, "content", "") or ""
+            verdict, reason = _parse_verdict(raw)
     except Exception:
         log.warning("action_bias evaluator failed", exc_info=True)
         verdict, reason = "INVALID", "exception"

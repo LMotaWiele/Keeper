@@ -190,75 +190,109 @@ class AutonomousEngine:
 
             elif action_type == "future_simulate":
                 action_desc = f"[Autonomous] Goal '{goal.name}': {goal.description[:200]}"
-                sim = await self.simulator.simulate(
-                    action_description=action_desc,
-                    conversation_context="No active session",
-                    internal_state=self.state,
-                    memory_context="",
-                    goals_context=f"Active goals: {[g.name for g in self.goals.active_instrumental]}",
-                )
-                if sim:
-                    summary = (
-                        f"Simulated next step: {sim.get('recommendation')} — "
-                        f"{(sim.get('reasoning') or '')[:180]}"
-                    )
-                    if self.memory:
-                        ep_id = await self.memory.store_episode(
-                            user_id=user_id,
-                            content=f"[Simulation] {goal.name}: {summary}",
-                            internal_state=self.state,
-                            salience=0.5,
-                            type="event",
-                            tags=["autonomous", "simulation", goal.name],
-                            source="autonomous_artifact",
+                skip_sim = False
+                if self.simulator is not None:
+                    try:
+                        skip_sim = not await self.simulator.should_simulate(
+                            action_desc, self.state
                         )
-                        artifact_refs = [f"episode:{ep_id}"]
+                    except Exception:
+                        log.debug("should_simulate failed — fail open", exc_info=True)
+                if skip_sim:
+                    summary = "Simulation skipped — not high-stakes"
                 else:
-                    summary = "Simulation produced no result"
+                    sim = await self.simulator.simulate(
+                        action_description=action_desc,
+                        conversation_context="No active session",
+                        internal_state=self.state,
+                        memory_context="",
+                        goals_context=(
+                            f"Active goals: "
+                            f"{[g.name for g in self.goals.active_instrumental]}"
+                        ),
+                    )
+                    if sim:
+                        summary = (
+                            f"Simulated next step: {sim.get('recommendation')} — "
+                            f"{(sim.get('reasoning') or '')[:180]}"
+                        )
+                        if self.memory:
+                            ep_id = await self.memory.store_episode(
+                                user_id=user_id,
+                                content=f"[Simulation] {goal.name}: {summary}",
+                                internal_state=self.state,
+                                salience=0.5,
+                                type="event",
+                                tags=["autonomous", "simulation", goal.name],
+                                source="autonomous_artifact",
+                            )
+                            artifact_refs = [f"episode:{ep_id}"]
+                    else:
+                        summary = "Simulation produced no result"
 
             elif action_type == "codebase_read":
                 modules = list(companion.codebase.index.keys()) if companion.codebase else []
                 chosen = modules[0] if modules else ""
+                skip_read = False
                 if modules:
-                    pick_prompt = (
-                        f"Goal: {goal.name} — {goal.description}\n"
-                        f"Modules:\n" + "\n".join(f"- {m}" for m in modules[:40]) +
-                        "\nPick ONE module path most relevant to this goal. "
-                        "Output ONLY the path."
-                    )
                     try:
-                        pick = await get_llm("autonomous_pursuit").ainvoke(
-                            [HumanMessage(content=pick_prompt)]
-                        )
-                        text = (pick.content or "").strip().strip("`")
-                        for m in modules:
-                            if m in text:
-                                chosen = m
-                                break
+                        from core.jev import jev_should_run
+                        if not await jev_should_run(
+                            "any_module_relevant",
+                            {
+                                "goal": goal.name,
+                                "description": goal.description,
+                                "modules": modules[:40],
+                            },
+                            background=True,
+                            task="autonomous_pursuit",
+                        ):
+                            skip_read = True
                     except Exception:
-                        pass
-                detail = companion.codebase.get_module_detail(chosen) if chosen else ""
-                analysis_prompt = (
-                    f"Goal: {goal.name} — {goal.description}\n"
-                    f"Module detail:\n{detail[:4000]}\n"
-                    "Write a short analysis of how this module relates to the goal "
-                    "and one concrete observation."
-                )
-                analysis = await get_llm("autonomous_pursuit").ainvoke(
-                    [HumanMessage(content=analysis_prompt)]
-                )
-                summary = f"Read {chosen}: {(analysis.content or '')[:200]}"
-                if self.memory:
-                    ep_id = await self.memory.store_episode(
-                        user_id=user_id,
-                        content=f"[Codebase] {chosen}: {analysis.content}",
-                        internal_state=self.state,
-                        salience=0.5,
-                        type="event",
-                        tags=["autonomous", "codebase", goal.name],
-                        source="autonomous_artifact",
+                        log.debug("codebase_read Jev gate failed — fail open", exc_info=True)
+                if skip_read:
+                    summary = "Codebase read skipped — no module relevant"
+                else:
+                    if modules:
+                        pick_prompt = (
+                            f"Goal: {goal.name} — {goal.description}\n"
+                            f"Modules:\n" + "\n".join(f"- {m}" for m in modules[:40]) +
+                            "\nPick ONE module path most relevant to this goal. "
+                            "Output ONLY the path."
+                        )
+                        try:
+                            pick = await get_llm("autonomous_pursuit").ainvoke(
+                                [HumanMessage(content=pick_prompt)]
+                            )
+                            text = (pick.content or "").strip().strip("`")
+                            for m in modules:
+                                if m in text:
+                                    chosen = m
+                                    break
+                        except Exception:
+                            pass
+                    detail = companion.codebase.get_module_detail(chosen) if chosen else ""
+                    analysis_prompt = (
+                        f"Goal: {goal.name} — {goal.description}\n"
+                        f"Module detail:\n{detail[:4000]}\n"
+                        "Write a short analysis of how this module relates to the goal "
+                        "and one concrete observation."
                     )
-                    artifact_refs = [f"episode:{ep_id}"]
+                    analysis = await get_llm("autonomous_pursuit").ainvoke(
+                        [HumanMessage(content=analysis_prompt)]
+                    )
+                    summary = f"Read {chosen}: {(analysis.content or '')[:200]}"
+                    if self.memory:
+                        ep_id = await self.memory.store_episode(
+                            user_id=user_id,
+                            content=f"[Codebase] {chosen}: {analysis.content}",
+                            internal_state=self.state,
+                            salience=0.5,
+                            type="event",
+                            tags=["autonomous", "codebase", goal.name],
+                            source="autonomous_artifact",
+                        )
+                        artifact_refs = [f"episode:{ep_id}"]
 
             elif action_type == "memory_synthesis":
                 recalled = {"episodic": [], "semantic": []}

@@ -37,7 +37,9 @@ async def self_theorize(user_id: int = 0) -> str:
     from core.loop import companion
     if not companion.api_budget.allows(Tier.MID, background=False):
         return "Not enough budget today for self-theorizing."
-    result = await companion.theorizer.theorize(user_id, companion.state)
+    result = await companion.theorizer.theorize(
+        user_id, companion.state, apply_jev_gate=False,
+    )
     if result is None:
         return (
             "Self-theorizing is throttled — last cycle was too recent "

@@ -41,9 +41,13 @@ class Settings:
 
     # ── LLM (OpenRouter) ──────────────────────────────────────────────────
     openrouter_api_key: str = os.getenv("OPENROUTER_API_KEY", "")
-    model_high: str = os.getenv("MODEL_HIGH", "x-ai/grok-4.6")
-    model_mid: str = os.getenv("MODEL_MID", "google/gemini-3.7-flash")
-    model_low: str = os.getenv("MODEL_LOW", "deepseek/deepseek-v4-flash-0731")
+    model_high: str = os.getenv("MODEL_HIGH", "google/gemini-3.8-flash")
+    model_mid: str = os.getenv("MODEL_MID", "google/gemini-3.8-flash")
+    model_low: str = os.getenv("MODEL_LOW", "z-ai/glm-5.3-flash")
+    model_high_fallback: str = os.getenv("MODEL_HIGH_FALLBACK", "google/gemini-3.7-flash")
+    model_mid_fallback: str = os.getenv("MODEL_MID_FALLBACK", "google/gemini-3.7-flash")
+    model_low_fallback: str = os.getenv("MODEL_LOW_FALLBACK", "~deepseek/deepseek-flash-latest")
+    jev_model: str = os.getenv("JEV_MODEL", "~typesafe/jev-latest")
     daily_budget_eur: float = float(os.getenv("DAILY_BUDGET_EUR", "10.0"))
     usd_to_eur: float = float(os.getenv("USD_TO_EUR", "0.92"))
 
@@ -83,6 +87,9 @@ class Settings:
     # ── Session ───────────────────────────────────────────────────────────
     session_timeout_minutes: float = float(os.getenv("SESSION_TIMEOUT_MIN", "15"))
     working_memory_capacity: int = int(os.getenv("WORKING_MEMORY_CAPACITY", "20"))
+    dialogue_window: int = int(os.getenv("DIALOGUE_WINDOW", "12"))
+    pin_capacity: int = int(os.getenv("PIN_CAPACITY", "8"))
+    pin_max_age_days: int = int(os.getenv("PIN_MAX_AGE_DAYS", "14"))
 
     # ── Diagnostics ───────────────────────────────────────────────────────
     diag_mode: bool = os.getenv("DIAG_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -104,15 +111,14 @@ class Settings:
     FORGET_MIN_AGE_DAYS: int = int(os.getenv("FORGET_MIN_AGE_DAYS", "7"))
     FORGET_THRESHOLD: float = float(os.getenv("FORGET_THRESHOLD", "0.25"))
     FORGET_MAX_PER_PASS: int = int(os.getenv("FORGET_MAX_PER_PASS", "50"))
-    FORGET_DRY_RUN: bool = _bool_env("FORGET_DRY_RUN", True)
+    FORGET_DRY_RUN: bool = _bool_env("FORGET_DRY_RUN", False)
     FORGET_PROMPT_CHAR_BUDGET: int = int(os.getenv("FORGET_PROMPT_CHAR_BUDGET", "4000"))
 
-    # ── Variance-gated state injection (KEEPER_PATCH_01 C) ────────────────
-    # Full current set so merge is behaviour-neutral; trim from state_variance.py.
-    STATE_FIELDS_INJECTED: list[str] = _str_list(
-        "STATE_FIELDS_INJECTED",
-        ["arousal", "valence", "curiosity", "fatigue"],
-    )
+    # ── Variance-gated state injection (KEEPER_PATCH_01 C / PATCH_02 A2) ──
+    # 72h state_trace: all affect fields std < 0.05; all five drives std > 0.15.
+    # Empty affect list omits the state block. Do not restore dropped fields
+    # if the autonomous loop goes quiet — that means it was firing on a constant.
+    STATE_FIELDS_INJECTED: list[str] = _str_list("STATE_FIELDS_INJECTED", [])
     DRIVES_INJECTED: list[str] = _str_list(
         "DRIVES_INJECTED",
         ["understand", "connect", "create", "resolve", "express"],
@@ -124,9 +130,16 @@ class Settings:
     STANDING_CONSTRAINTS_MAX: int = int(os.getenv("STANDING_CONSTRAINTS_MAX", "3"))
     ACTION_BIAS_EVAL_MODEL: str = os.getenv(
         "ACTION_BIAS_EVAL_MODEL",
-        os.getenv("MODEL_LOW", "deepseek/deepseek-v4-flash-0731"),
+        os.getenv("MODEL_LOW", "z-ai/glm-5.3-flash"),
     )
     ACTION_BIAS_MIN_REPLY_TOKENS: int = int(os.getenv("ACTION_BIAS_MIN_REPLY_TOKENS", "20"))
+
+    # ── User-life tracker (KEEPER_PATCH_02 B) ─────────────────────────────
+    COMMITMENTS_INJECTED_MAX: int = int(os.getenv("COMMITMENTS_INJECTED_MAX", "5"))
+    COMMITMENT_GRACE_HOURS: int = int(os.getenv("COMMITMENT_GRACE_HOURS", "24"))
+    OVERDUE_SURFACE_COOLDOWN_H: int = int(os.getenv("OVERDUE_SURFACE_COOLDOWN_H", "24"))
+    WELLBEING_INFERRED_IN_TRENDS: bool = False  # do not flip; inferred is audit-only
+    USER_TIMEZONE: str = os.getenv("USER_TIMEZONE", "Europe/Amsterdam")
 
     def ensure_dirs(self) -> None:
         """Create data directories if they don't exist. Seed SOUL.md from the sample."""

@@ -189,6 +189,18 @@ class ResearchEngine:
 
         # Step 3: Format and synthesize
         formatted_results = self._format_search_results(all_results)
+        try:
+            from core.jev import jev_should_run
+            if not await jev_should_run(
+                "hits_support_a_position",
+                {"topic": topic, "hits": formatted_results[:6000]},
+                background=True,
+                task="research_synthesis",
+            ):
+                log.info("research_synthesis skipped — jev hits_support_a_position")
+                return None
+        except Exception:
+            log.debug("research_synthesis Jev gate failed — fail open", exc_info=True)
         synthesis = await self._synthesize(topic, context, formatted_results)
         if not synthesis:
             log.warning("Failed to synthesize research for: %s", topic)

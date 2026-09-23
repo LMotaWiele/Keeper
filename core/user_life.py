@@ -569,10 +569,45 @@ class UserLifeTracker:
         self._session_block = ""
 
     def to_prompt_context(self) -> str:
-        """Session-cached commitments block. Omitted entirely when empty."""
+        """Session-cached block kept for tests of the tracker.
+
+        The conversational prompt does not call this. Patch 03 reads the
+        ledger only from /tasks or get_active_commitments.
+        """
         if not self._session_cached:
             self.on_session_start()
         return self._session_block or ""
+
+    def format_tasks(self) -> str:
+        """Three flat lists, newest first. No ratios, no urgency ordering."""
+        groups = {"open": [], "done": [], "abandoned": []}
+        for c in self.commitments:
+            if c.status == "done":
+                groups["done"].append(c)
+            elif c.status == "abandoned":
+                groups["abandoned"].append(c)
+            elif c.status in ("active", "missed"):
+                groups["open"].append(c)
+        lines: list[str] = []
+        labels = (("open", "Open"), ("done", "Done"), ("abandoned", "Abandoned"))
+        for key, label in labels:
+            items = sorted(groups[key], key=lambda c: c.created_at or "", reverse=True)
+            lines.append(label)
+            if not items:
+                lines.append("(none)")
+            for c in items:
+                recorded = (c.created_at or "")[:10]
+                extra = ""
+                if c.deadline:
+                    extra = f" — deadline {(c.deadline or '')[:10]}"
+                lines.append(f"- {c.text} — recorded {recorded}{extra}")
+            lines.append("")
+        reported = list(reversed(self.wellbeing_trend_rows()))
+        if reported:
+            lines.append("Self-reported")
+            for w in reported[:12]:
+                lines.append(f"- {(w.ts or '')[:10]}  {w.score:.2f}  {w.evidence}")
+        return "\n".join(lines).rstrip()
 
     # ── Wellbeing ─────────────────────────────────────────────────────────
 

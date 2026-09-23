@@ -67,6 +67,13 @@ UNBOUNDED_GOALS = [
         "tags": ["unbounded", "meta", "user_life"],
     },
 ]
+def chat_toward(goal: "Goal") -> str:
+    """Chat line for a goal. The user-life ledger wording stays off the prompt."""
+    if goal.name == "user_life_improvement":
+        return "the user's life outside this chat, grounded in facts he has stated"
+    return goal.ceiling_description or goal.description
+
+
 # ── Goal dataclass ────────────────────────────────────────────────────────
 
 @dataclass
@@ -635,7 +642,7 @@ class GoalSystem:
         lines = []
         for g in sorted(active, key=lambda g: g.salience, reverse=True):
             if g.is_unbounded:
-                lines.append(f"- {g.name} (ongoing): {g.ceiling_description or g.description}")
+                lines.append(f"- {g.name} (ongoing): {chat_toward(g)}")
             else:
                 done_when = ""
                 if g.completion_condition:
@@ -659,9 +666,9 @@ class GoalSystem:
             for g in sorted(active, key=lambda g: g.salience, reverse=True):
                 parent = f" (serves: {g.parent_goal})" if g.parent_goal else ""
                 if g.is_unbounded:
+                    toward = chat_toward(g)
                     parts.append(
-                        f"- **{g.name}**{parent} (ongoing) — toward: "
-                        f"{g.ceiling_description or g.description}"
+                        f"- **{g.name}**{parent} (ongoing) — toward: {toward}"
                     )
                     rated = [
                         (t, info) for t, info in (g.action_ratings or {}).items()

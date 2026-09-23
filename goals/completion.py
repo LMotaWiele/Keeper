@@ -222,9 +222,19 @@ def _check_proposal(companion: Any, goal_created: str) -> tuple[bool, str]:
     if theorizer is None:
         return False, "no theorizer"
     for p in theorizer.pending_proposals:
-        if (p.get("generated_at") or "") > goal_created:
-            return True, p.get("title") or "proposal"
+        if (p.get("generated_at") or p.get("created_at") or "") > goal_created:
+            return True, p.get("title") or p.get("change") or "proposal"
     return False, "no new proposals"
+
+
+def harness_verify_open(theorizer: Any, *, run_id: str, now=None) -> int:
+    """Run executable checks for proposals this run did not create.
+
+    Verdict is written only here (via the harness), never by a model call.
+    """
+    from goals.proposals import verify_open_proposals
+    proposals = list(getattr(theorizer, "_proposals", []) or [])
+    return verify_open_proposals(proposals, run_id=run_id, now=now)
 
 
 USER_CONFIRMED_PROMPT = """\

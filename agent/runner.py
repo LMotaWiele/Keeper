@@ -70,6 +70,13 @@ async def run_agent(user_id: int, user_text: str) -> str:
         "forced_answer": False,
     }
 
+    turn_id = str(uuid.uuid4())
+    _dump_assembled_prompt(
+        turn_id,
+        context.get("system_prompt") or "",
+        context.get("prompt_token_split"),
+    )
+
     if config.diag_mode:
         diag_dir = Path(config.data_dir) / "diag"
         diag_dir.mkdir(parents=True, exist_ok=True)
@@ -79,7 +86,6 @@ async def run_agent(user_id: int, user_text: str) -> str:
         log.info("DIAG dumped system prompt to %s (%d chars)", prompt_path, prompt_path.stat().st_size)
 
     trial_id = None
-    turn_id = str(uuid.uuid4())
     bias_text = context.get("action_bias_text")
     hypothesis_id = context.get("action_bias_hypothesis_id")
     if config.ACTION_BIAS_ENABLED and bias_text and hypothesis_id:
@@ -178,4 +184,46 @@ async def run_agent(user_id: int, user_text: str) -> str:
         shipped_preamble, len(response_text), elapsed_ms,
     )
 
+    try:
+        _record_register(user_id, turn_id, user_text, response_text)
+    except Exception:
+        log.warning("register_trace failed", exc_info=True)
+
     return response_text
+
+
+def _dump_assembled_prompt(turn_id: str, system_prompt: str, split: dict | None) -> None:
+    """Write the assembled system prompt before generation."""
+    if not config.DUMP_ASSEMBLED_PROMPT:
+        return
+    directory = Path(config.data_dir) / "logs" / "prompt"
+    directory.mkdir(parents=True, exist_ok=True)
+    keeper = (split or {}).get("keeper", 0)
+    user = (split or {}).get("user", 0)
+    header = f"# keeper_tokens={keeper} user_tokens={user}\n"
+    path = directory / f"{turn_id}.txt"
+    path.write_text(header + system_prompt, encoding="utf-8")
+    log.info("PROMPT dumped %s keeper_tokens=%s user_tokens=%s", path, keeper, user)
+
+
+def _record_register(user_id: int, turn_id: str, user_text: str, reply: str) -> None:
+    from core.register_trace import record_reply
+    items = companion.memory.working.get_items(user_id)
+    humans = [
+        getattr(i, "content", "")
+        for i in items
+        if getattr(i, "role", "") in ("user", "human")
+    ]
+    prior = humans[-2] if len(humans) >= 2 else ""
+    slots = [s.value for s in companion.user_world.get_world_model()]
+    open_texts = [
+        c.text for c in companion.user_life.commitments if c.status == "active"
+    ]
+    record_reply(
+        turn_id=turn_id,
+        reply=reply,
+        user_text=user_text,
+        prior_user_text=prior,
+        slot_values=slots,
+        open_commitment_texts=open_texts,
+    )

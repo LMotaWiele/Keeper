@@ -95,11 +95,14 @@ def ensure_hypothesis_fields(hypotheses: list[dict], version: int = 0) -> list[d
 
 
 def eligible_hypotheses(hypotheses: list[dict]) -> list[dict]:
+    """Unverified character hypotheses are speculation and are not injected."""
+    from goals.proposals import has_executable_check
     return [
         h for h in hypotheses
         if not h.get("tested")
         and h.get("actionable") is not False
         and not h.get("needs_capability_review")
+        and has_executable_check(h)
     ]
 
 
@@ -171,14 +174,26 @@ async def ensure_bias_text(hypothesis: dict) -> str:
 
 
 def standing_block(model: dict) -> str:
+    """Chat injection keeps only constraints tied to an executable check."""
+    from goals.proposals import has_executable_check
     items = model.get("standing_constraints") or []
-    if not items:
-        return ""
+    hyps = {h.get("id"): h for h in (model.get("hypotheses") or []) if isinstance(h, dict)}
     lines = ["Standing behavioural constraints:"]
-    for item in items[: config.STANDING_CONSTRAINTS_MAX]:
-        text = item if isinstance(item, str) else item.get("text")
+    kept = 0
+    for item in items:
+        if kept >= config.STANDING_CONSTRAINTS_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        hyp = hyps.get(item.get("hypothesis_id"))
+        if hyp is None or not has_executable_check(hyp):
+            continue
+        text = item.get("text")
         if text:
             lines.append(f"- {text}")
+            kept += 1
+    if kept == 0:
+        return ""
     return "\n".join(lines)
 
 

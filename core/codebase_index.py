@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -76,6 +78,116 @@ def _classify_pillar(path: str) -> str:
     return "infrastructure"
 
 
+def project_root() -> Path:
+    """Repository root (parent of core/)."""
+    return Path(__file__).resolve().parents[1]
+
+
+def normalize_module_path(module_path: str) -> str:
+    rel = (module_path or "").strip().replace("\\", "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    return rel
+
+
+def module_path_problem(module_path: str) -> str | None:
+    """Reject a target that names more than one module.
+
+    A single path such as core/user_life.py is one module. A comma, the
+    word 'and', or more than one *.py path is a plan, not a proposal.
+    """
+    text = (module_path or "").strip()
+    if not text:
+        return "unresolved_module"
+    if "," in text or ";" in text or "|" in text:
+        return "multi_module"
+    if re.search(r"\band\b", text, flags=re.IGNORECASE):
+        return "multi_module"
+    py_paths = re.findall(r"[\w./\\-]+\.py\b", text)
+    if len(py_paths) > 1:
+        return "multi_module"
+    return None
+
+
+def _skip_path(path: Path) -> bool:
+    return any(part in path.parts for part in ("venv", ".venv", "data", "__pycache__"))
+
+
+def find_module_file(root: Path, module_path: str) -> Path | None:
+    """Resolve one relative module path to a file under root. None if missing."""
+    rel = normalize_module_path(module_path)
+    if not rel or module_path_problem(rel) == "multi_module":
+        return None
+    candidate = (root / rel).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    if candidate.is_file():
+        return candidate
+    name = Path(rel).name
+    if not name.endswith(".py"):
+        return None
+    matches = [
+        p for p in root.rglob(name)
+        if p.is_file() and not _skip_path(p) and p.as_posix().endswith(rel)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def symbol_source(file_path: Path, symbol: str) -> str | None:
+    """Return the source of a function or class named symbol, or None."""
+    try:
+        raw = file_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        tree = ast.parse(raw)
+    except SyntaxError:
+        return None
+    wanted = (symbol or "").strip()
+    if not wanted:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == wanted:
+                segment = ast.get_source_segment(raw, node)
+                return segment if segment else None
+    return None
+
+
+@dataclass
+class SymbolResolution:
+    path: str
+    source: str
+
+
+def resolve_symbol(
+    module_path: str,
+    symbol: str,
+    project: Path | None = None,
+) -> tuple[SymbolResolution | None, str | None]:
+    """Resolve a proposal target.
+
+    Returns (resolution, None) or (None, reason) where reason is
+    multi_module, unresolved_module, or unresolved_symbol.
+    """
+    problem = module_path_problem(module_path)
+    if problem:
+        return None, problem
+    root = project or project_root()
+    file_path = find_module_file(root, module_path)
+    if file_path is None:
+        return None, "unresolved_module"
+    source = symbol_source(file_path, symbol)
+    if source is None:
+        return None, "unresolved_symbol"
+    rel = file_path.resolve().relative_to(root.resolve()).as_posix()
+    return SymbolResolution(path=rel, source=source), None
+
+
 def get_full_source(project_root: Path, module_path: str) -> str:
     """Load full source of a specific module — used sparingly."""
     fp = project_root / module_path
@@ -142,6 +254,10 @@ class CodebaseIndex:
 
     def get_source(self, module_path: str) -> str:
         return get_full_source(self.project_root, module_path)
+
+    def resolve_symbol(self, module_path: str, symbol: str):
+        """Resolve one module and one symbol against this checkout."""
+        return resolve_symbol(module_path, symbol, project=self.project_root)
 
     def list_modules(self) -> str:
         """Path, pillar, one-line purpose — no source."""

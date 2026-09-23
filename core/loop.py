@@ -22,6 +22,7 @@ from core.codebase_index import CodebaseIndex
 from core.llm import Tier
 from core.resource_budgets import APIBudget, refresh_model_pricing
 from core.user_life import UserLifeTracker
+from core.user_world import UserWorldModel
 from environment.grounding import EnvironmentalGrounding
 from environment.future_sim import FutureSimulator
 from goals.system import GoalSystem
@@ -122,6 +123,7 @@ class ConsciousArchitecture:
         self.api_budget = APIBudget()
 
         self.user_life = UserLifeTracker()
+        self.user_world = UserWorldModel()
 
         self.theorizer = SelfTheorizer(
             codebase=self.codebase,
@@ -187,6 +189,7 @@ class ConsciousArchitecture:
         # 1. Init memory stores
         await self.memory.init()
         self.user_life.ensure_schema()
+        self.user_world.ensure_schema()
         from core.action_bias import void_capability_absent_trials
         void_capability_absent_trials()
 
@@ -235,6 +238,12 @@ class ConsciousArchitecture:
                 self.theorizer.restore(json.loads(theorizer_path.read_text()))
             except Exception as e:
                 log.warning("Failed to load theorizer state: %s", e)
+        try:
+            from goals.completion import harness_verify_open
+            from goals.proposals import current_run_id
+            harness_verify_open(self.theorizer, run_id=current_run_id())
+        except Exception:
+            log.debug("proposal harness failed", exc_info=True)
 
         sessions_path = state_dir / "sessions.json"
         if sessions_path.exists():
@@ -440,7 +449,6 @@ class ConsciousArchitecture:
             import uuid as _uuid
             self.state.session_id = str(_uuid.uuid4())
             self.environment.on_session_start(user_id)
-            self.user_life.on_session_start(self.state.session_id)
 
         self.environment.on_user_message(user_id)
 
@@ -637,20 +645,27 @@ class ConsciousArchitecture:
         if any(kw in _lower for kw in ARCHITECTURE_KEYWORDS):
             blocks.append(("architecture", self.codebase.summary))
 
-        life_ctx = self.user_life.to_prompt_context()
-        if life_ctx:
-            blocks.append(("user_life", life_ctx))
+        world_ctx = self.user_world.to_prompt_context(user_text)
+        if world_ctx:
+            blocks.append(("user_world", world_ctx))
 
         blocks.append((
             "tool_instructions",
             "\n---\n"
-            "You have tools: web_search, memory management, user-life tracking\n"
-            "(record_user_commitment, update_commitment_status,\n"
-            "get_active_commitments, log_wellbeing_snapshot), and introspection\n"
+            "You have tools: web_search, memory, world facts\n"
+            "(record_world_fact, confirm_world_fact, supersede_world_fact,\n"
+            "get_world_model), and introspection\n"
             "(codebase_overview, codebase_list_modules, codebase_read_module,\n"
             "self_theorize, simulate_action, list_opinions, goal_status).\n"
-            "When the user commits to doing something, record it with their own\n"
-            "words as evidence — do not lecture about the commitment instead.\n"
+            "When he states a fact about his life, record_world_fact with his\n"
+            "exact words as the quote. confirm_world_fact when he restates one.\n"
+            "supersede_world_fact when a fact has changed. Do not announce that\n"
+            "you wrote it down.\n"
+            "\n"
+            "When he says he will do something, record it with the matching tool\n"
+            "and his own words as evidence, then continue the conversation he is\n"
+            "in. Do not announce the record, do not repeat a deadline, and do not\n"
+            "raise old items unless he asked.\n"
             "\n"
             "Search the web before agreeing with a factual or contestable claim in a\n"
             "domain where you hold no externally-grounded opinion. Check list_opinions\n"
@@ -659,9 +674,9 @@ class ConsciousArchitecture:
             "it is you having no position of your own.\n"
             "\n"
             "Use memory tools proactively; your future self depends on them.\n"
-            "Do not recap standing user-life facts (housing, commission, income)\n"
-            "unless the user asked or the fact changed this turn. Do not restate\n"
-            "numbered plans from your previous reply.\n"
+            "Do not recap standing facts (housing, work, income) unless he asked\n"
+            "or the fact changed this turn. Do not restate numbered plans from\n"
+            "your previous reply.\n"
             "Reply naturally, as a companion would.",
         ))
 
@@ -681,6 +696,12 @@ class ConsciousArchitecture:
                 blocks.append(("action_bias", tail))
 
         system_prompt = "\n\n".join(content for _, content in blocks)
+        user_tokens = len((world_ctx or "").split())
+        keeper_tokens = max(0, len(system_prompt.split()) - user_tokens)
+        log.info(
+            "PROMPT split: keeper_tokens=%d user_tokens=%d",
+            keeper_tokens, user_tokens,
+        )
         log.info(
             "PROMPT affect: arousal=%.3f valence=%.3f curiosity=%.3f fatigue=%.3f mode=%r blocks=%s",
             self.state.arousal,
@@ -715,6 +736,7 @@ class ConsciousArchitecture:
             "processing_mode": self.state.processing_mode,
             "action_bias_text": bias_text,
             "action_bias_hypothesis_id": hypothesis_id,
+            "prompt_token_split": {"keeper": keeper_tokens, "user": user_tokens},
         }
 
     # ── Helpers ───────────────────────────────────────────────────────────
@@ -878,6 +900,7 @@ class ConsciousArchitecture:
             f"self-model: v{self.self_model.model.get('model_version', 0)} "
             f"obs={self.self_model.model.get('observation_count', 0)} "
             f"hypotheses={len(self.self_model.model.get('hypotheses') or [])}",
+            f"integration: {_format_integration()}",
             "",
             f"background_tasks: {len(self._background_tasks)} "
             f"({sum(1 for t in self._background_tasks if not t.done())} running)",
@@ -889,6 +912,17 @@ class ConsciousArchitecture:
             f"autonomous last skip: {self.autonomous.last_skip_reason or '(none)'}",
         ]
         return "\n".join(lines)
+
+
+def _format_integration() -> str:
+    try:
+        from goals.proposals import integration_score
+        score = integration_score()
+    except Exception:
+        return "n/a"
+    if score is None:
+        return "n/a"
+    return f"{score:.2f}"
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────

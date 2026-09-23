@@ -180,12 +180,30 @@ def test_state_injection_omits_empty_lists():
         settings_mod.config.DRIVES_INJECTED = orig_d
 
 
+_SCRIPT_CHECK = {
+    "kind": "script",
+    "path": "scripts/replay_proposal_3.py",
+    "passes_when": "exit 0",
+}
+
+
 def test_action_bias_sticky_selection():
     model = {
         "model_version": 12,
         "hypotheses": [
-            {"statement": "a", "confidence": 0.5, "tested": False},
-            {"statement": "b", "confidence": 0.9, "tested": False},
+            {
+                "statement": "a",
+                "confidence": 0.5,
+                "tested": False,
+                "verification": dict(_SCRIPT_CHECK),
+            },
+            {
+                "statement": "b",
+                "confidence": 0.9,
+                "tested": False,
+                "verification": dict(_SCRIPT_CHECK),
+            },
+            {"statement": "unverified", "confidence": 0.99, "tested": False},
         ],
     }
     first = select_sticky(model)
@@ -194,6 +212,7 @@ def test_action_bias_sticky_selection():
     model["hypotheses"][0]["confidence"] = 0.99
     again = select_sticky(model)
     assert again["id"] == hid
+    assert again["statement"] != "unverified"
 
 
 def test_invalid_does_not_break_held_streak():
@@ -291,4 +310,13 @@ def test_ensure_hypothesis_fields_assigns_ids():
     assert hyps[0]["trial_log"] == []
     assert hyps[0]["capability_verified"] is False
     assert hyps[0]["capability_note"] is None
+    assert not eligible_hypotheses(hyps)
+    hyps[0]["verification"] = {
+        "kind": "metric",
+        "table": "state_trace",
+        "column": "arousal",
+        "direction": "varies",
+        "threshold": 0.1,
+        "window_hours": 24,
+    }
     assert eligible_hypotheses(hyps)

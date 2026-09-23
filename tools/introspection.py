@@ -46,37 +46,37 @@ async def self_theorize(user_id: int = 0) -> str:
             f"(minimum interval {companion.theorizer.MIN_INTERVAL_HOURS}h)."
         )
     proposals = result.get("proposals") or []
+    speculations = result.get("speculations") or []
+    score = result.get("integration")
+    score_txt = "n/a" if score is None else f"{score:.2f}"
     write_path = (
         "Approved proposals are queued for Lucas to implement. "
         "Nothing applies them automatically. The write path runs through him."
     )
-    if not proposals:
-        return "Theorizing finished with no new proposals.\n" + write_path
     lines = [
-        f"Generated {len(proposals)} proposal(s):",
+        (
+            f"Theorizing: {len(proposals)} proposal(s), "
+            f"{len(speculations)} speculation(s). Integration: {score_txt}"
+        ),
         write_path,
     ]
     for i, p in enumerate(proposals):
-        title = p.get("title", "untitled")
-        body = (
-            p.get("expected_impact")
-            or p.get("rationale")
-            or p.get("proposal")
-            or ""
-        )
-        chunk = f"[{i}] {title}"
-        rationale = (p.get("rationale") or "")[:400]
-        impact = (p.get("expected_impact") or "")[:400]
+        title = p.get("title") or p.get("change") or "untitled"
+        lines.append(f"[{i}] {title}")
         target = p.get("target_module") or ""
-        lines.append(chunk)
-        if target:
-            lines.append(f"  target: {target}")
-        if rationale:
-            lines.append(f"  rationale: {rationale}")
-        if impact:
-            lines.append(f"  impact: {impact}")
-        if body and body not in (rationale, impact):
-            lines.append(f"  {str(body)[:600]}")
+        symbol = p.get("current_symbol") or ""
+        if target or symbol:
+            lines.append(f"  target: {target} {symbol}".rstrip())
+        behaviour = (p.get("current_behaviour") or "")[:400]
+        if behaviour:
+            lines.append(f"  now: {behaviour}")
+        verification = p.get("verification_kind") or ""
+        if verification:
+            lines.append(f"  check: {verification}")
+    for s in speculations[:8]:
+        reason = s.get("reason") or "speculation"
+        text = (s.get("text") or "")[:240]
+        lines.append(f"- speculation ({reason}): {text}")
     return "\n".join(lines)
 
 

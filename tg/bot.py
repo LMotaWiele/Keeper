@@ -160,6 +160,32 @@ async def goals_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _reply(update, "\n".join(lines))
 
 
+async def tasks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Open, done, and abandoned items. Newest first. No ratios."""
+    if not allowed(update):
+        return
+    await _reply(update, companion.user_life.format_tasks())
+
+
+async def world_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Print the world model, or retire one key with /world forget <key>."""
+    if not allowed(update):
+        return
+    args = list(ctx.args or [])
+    if args and args[0].lower() == "forget":
+        key = args[1] if len(args) > 1 else ""
+        if not key:
+            await update.message.reply_text("Usage: /world forget <key>")
+            return
+        result = companion.user_world.forget(key)
+        if result.get("ok"):
+            await update.message.reply_text(f"Retired {key}.")
+        else:
+            await update.message.reply_text(result.get("error") or "No live slot.")
+        return
+    await _reply(update, companion.user_world.format_inspection())
+
+
 async def diag_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Read-only diagnostic dump."""
     if not allowed(update):
@@ -229,6 +255,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("goals", goals_cmd))
     app.add_handler(CommandHandler("actions", actions_cmd))
+    app.add_handler(CommandHandler("tasks", tasks_cmd))
+    app.add_handler(CommandHandler("world", world_cmd))
     app.add_handler(CommandHandler("diag", diag_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

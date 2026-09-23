@@ -48,6 +48,23 @@ Example output:
 Episodes to analyse:
 """
 
+SLOT_EXTRACTION_PROMPT = """\
+Copy facts the user stated about their own life. For each fact provide:
+- "domain": one of work, project, people, place, rhythm, material, health
+- "key": a stable snake_case identifier
+- "value": one short factual statement, no assessment
+- "quote": the user's exact words, copied character for character from one episode
+- "source_index": the episode number the quote was copied from
+
+Do not infer mood, personality, or psychological state.
+Do not paraphrase the quote. If you cannot copy a quote exactly, omit the fact.
+Do not combine two facts into one.
+
+Output ONLY a JSON array.
+
+Episodes:
+"""
+
 CONTRADICTION_CHECK_PROMPT = """\
 You are checking new patterns against existing knowledge for contradictions.
 
@@ -166,6 +183,11 @@ class MemoryConsolidator:
                             source_episode_ids=source_ids,
                         )
 
+            from config.settings import config as _config
+            if _config.WORLD_CONSOLIDATION_ENABLED:
+                slot_result = await self._extract_world_slots(episodes)
+                result.update(slot_result)
+
             # 5. Apply decay to all episodes
             result["episodes_decayed"] = await episodic.apply_decay(user_id)
 
@@ -220,6 +242,35 @@ class MemoryConsolidator:
         except Exception as e:
             log.warning("Pattern extraction failed: %s", e)
             return []
+
+    async def _extract_world_slots(self, episodes: list[dict]) -> dict:
+        """Stage quote-anchored world slots. Does not touch the forgetting path."""
+        from config.settings import config
+        from core.loop import companion
+        empty = {"world_slots_staged": 0, "world_slots_dropped": 0, "world_slots_promoted": 0}
+        if not config.WORLD_CONSOLIDATION_ENABLED or len(episodes) < 1:
+            return empty
+        episode_text = "\n".join(
+            f"[{i}] {ep.get('content') or ''}"
+            for i, ep in enumerate(episodes)
+        )
+        prompt = SLOT_EXTRACTION_PROMPT + episode_text
+        try:
+            response = await get_llm("world_slot_extraction", json_mode=True).ainvoke([
+                HumanMessage(content=prompt),
+            ])
+            candidates = parse_json_lenient(response.content)
+        except Exception as exc:
+            log.warning("World slot extraction failed: %s", exc)
+            return empty
+        if not isinstance(candidates, list):
+            return empty
+        summary = companion.user_world.stage_consolidation_batch(candidates, episodes)
+        return {
+            "world_slots_staged": summary["staged"],
+            "world_slots_dropped": summary["dropped"],
+            "world_slots_promoted": summary["promoted"],
+        }
 
     # ── Contradiction checking ────────────────────────────────────────────
 

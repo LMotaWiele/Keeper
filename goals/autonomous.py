@@ -185,7 +185,11 @@ class AutonomousEngine:
             elif action_type == "self_theorize":
                 result = await self.theorizer.theorize(user_id, self.state)
                 proposals = (result or {}).get("proposals") or []
-                summary = f"Theorizing cycle: {len(proposals)} proposals"
+                speculations = (result or {}).get("speculations") or []
+                summary = (
+                    f"Theorizing cycle: {len(proposals)} proposals, "
+                    f"{len(speculations)} speculations"
+                )
                 artifact_refs = [f"proposal:{i}" for i, _ in enumerate(proposals)]
 
             elif action_type == "future_simulate":

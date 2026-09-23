@@ -36,6 +36,8 @@ async def record_user_commitment(
     evidence must be the user's own words, not a paraphrase of the commitment.
     deadline is optional (ISO date or relative: 'tomorrow', 'end of week').
     Do not invent a user_id; there is one user.
+    Do not announce the record, do not restate a deadline, and do not add
+    a confirmation turn. Continue the conversation he was having.
     """
     life = _tracker()
     payload = life.record_commitment(
@@ -62,6 +64,7 @@ async def update_commitment_status(
 
     Abandoning is frictionless — do not ask for confirmation, do not follow up.
     Unknown ids return the currently open ids; never fail silently.
+    Do not announce the update.
     """
     life = _tracker()
     return _dump(life.update_status(int(commitment_id), status, note=note))
@@ -69,7 +72,11 @@ async def update_commitment_status(
 
 @tool
 async def get_active_commitments() -> str:
-    """Return open commitments and any missed item not yet surfaced, nearest deadline first."""
+    """Return open items he said he would do.
+
+    Call this only when he asks what he was going to do. Do not call it to
+    open a status check.
+    """
     life = _tracker()
     items = life.get_active_commitments()
     return _dump({

@@ -141,6 +141,18 @@ class Settings:
     WELLBEING_INFERRED_IN_TRENDS: bool = False  # do not flip; inferred is audit-only
     USER_TIMEZONE: str = os.getenv("USER_TIMEZONE", "Europe/Amsterdam")
 
+    # ── Relational grounding (KEEPER_PATCH_03) ────────────────────────────
+    # Prompt dump lands in data/logs/prompt/<turn_id>.txt (the logs/prompt tree).
+    DUMP_ASSEMBLED_PROMPT: bool = _bool_env("DUMP_ASSEMBLED_PROMPT", True)
+    # Roughly the character budget the commitment block used. Substitution, not growth.
+    WORLD_PROMPT_CHAR_BUDGET: int = int(os.getenv("WORLD_PROMPT_CHAR_BUDGET", "800"))
+    # Opt out of consolidation as a world-slot write path. The forgetting
+    # predicate is untouched and still gated by FORGET_DRY_RUN.
+    WORLD_CONSOLIDATION_ENABLED: bool = _bool_env("WORLD_CONSOLIDATION_ENABLED", True)
+    WORLD_CONSOLIDATION_MAX_DROP_RATE: float = float(
+        os.getenv("WORLD_CONSOLIDATION_MAX_DROP_RATE", "0.10")
+    )
+
     def ensure_dirs(self) -> None:
         """Create data directories if they don't exist. Seed SOUL.md from the sample."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

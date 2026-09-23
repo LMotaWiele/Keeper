@@ -583,7 +583,7 @@ class SelfModel:
                     for key in (
                         "id", "tested", "actionable", "bias_text", "trial_log",
                         "capability_verified", "capability_note",
-                        "needs_capability_review",
+                        "needs_capability_review", "verification",
                     ):
                         if key in prev:
                             h[key] = prev[key]
@@ -591,10 +591,28 @@ class SelfModel:
                 h.setdefault("tested", False)
                 merged.append(h)
             self.model["hypotheses"] = ensure_hypothesis_fields(merged, version)
+            self._note_unverified_hypotheses(self.model["hypotheses"])
             return self.model["hypotheses"]
         except Exception as e:
             log.warning("Hypothesis generation failed: %s", e)
             return []
+
+    def _note_unverified_hypotheses(self, hypotheses: list[dict]) -> None:
+        """Character hypotheses with no check are speculation, not a queue."""
+        from goals.proposals import current_run_id, has_executable_check, record_speculation
+        run_id = current_run_id()
+        for h in hypotheses:
+            if has_executable_check(h):
+                continue
+            try:
+                record_speculation(
+                    text=str(h.get("statement") or ""),
+                    reason="no_verification",
+                    created_by_run=run_id,
+                    spec_id=f"hyp-{h.get('id') or ''}",
+                )
+            except Exception:
+                log.debug("hypothesis speculation record failed", exc_info=True)
 
     # ── Prompt injection ──────────────────────────────────────────────────
 
@@ -620,9 +638,9 @@ class SelfModel:
             parts.append(f"Engagement: {bp.get('engagement_style', 'unknown')}")
             parts.append(f"Depth: {bp.get('depth_preference', 'unknown')}")
             parts.append(f"Initiative: {bp.get('initiative_level', 'unknown')}")
-            tendencies = bp.get("notable_tendencies", [])
-            if tendencies:
-                parts.append(f"Tendencies: {', '.join(tendencies[:5])}")
+            # Tendency prose has no executable check, so it is speculation
+            # and stays out of the chat prompt. The theorizer still sees
+            # the full model.
 
         pref = self.model.get("preference_map", {})
         if pref.get("gravitates_toward"):
@@ -643,8 +661,12 @@ class SelfModel:
             "You can agree, disagree, or notice new tensions with this model."
         )
 
-        # Hypotheses
-        hypotheses = self.model.get("hypotheses", [])
+        # Hypotheses with an executable check only. The rest are speculation.
+        from goals.proposals import has_executable_check
+        hypotheses = [
+            h for h in (self.model.get("hypotheses") or [])
+            if isinstance(h, dict) and has_executable_check(h)
+        ]
         if hypotheses:
             parts.append("\n## Active hypotheses about myself")
             parts.append(

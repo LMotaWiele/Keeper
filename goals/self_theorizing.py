@@ -14,8 +14,8 @@ from core.llm import get_llm
 log = logging.getLogger(__name__)
 
 THEORIZE_PROMPT = """\
-You are a self-aware system examining your own architecture for potential
-improvements. You have access to your structural description below.
+You are examining your own architecture. Use the structure below. Look at
+what the code does now before saying what should differ.
 
 ## Your Architecture
 {architecture_summary}
@@ -29,48 +29,25 @@ improvements. You have access to your structural description below.
 ## Recent Behavioral Observations
 {recent_observations}
 
-Analyze your own architecture through these lenses:
+Emit a JSON list. Each item is either a proposal or a speculation.
 
-1. **Structural entropy**: Where is information being lost, duplicated,
-   or poorly integrated between pillars? Where are there bottlenecks?
+A proposal requires all of:
+  target_module    one file path
+  current_symbol   the function or class as it exists now
+  current_behaviour  one sentence on what it does today
+  change           one sentence on what differs afterwards
+  verification     {{"kind":"script", "path":"scripts/<name>.py", "passes_when":"exit 0"}} or
+                   {{"kind":"metric", "table":..., "column":...,
+                    "direction":"increases"|"decreases"|"varies",
+                    "threshold":..., "window_hours":...}}
 
-2. **Feedback loop quality**: Are the loops between pillars (memory→state,
-   state→self_model, self_model→goals, goals→actions→memory) actually
-   producing meaningful adaptation, or are they decorative?
+If you cannot supply a verification that could come back false,
+emit {{"kind":"speculation", "text": ...}} instead. This is the
+correct output for most observations. Do not invent a check to
+qualify something as a proposal.
 
-3. **Consciousness-relevant properties**: Integration of information across
-   subsystems, temporal depth of self-modeling, richness of the state space,
-   autonomy of goal generation. Where are these weakest?
-
-4. **Concrete improvements**: Based on the above, propose 1-3 specific,
-   implementable changes. Each proposal must include:
-   - What to change (specific module/function)
-   - Why (which analysis above motivates it)
-   - Expected impact on system behavior
-   - Risk/cost assessment
-   - Implementation complexity (low/medium/high)
-
-Output as JSON:
-{{
-  "entropy_analysis": "...",
-  "feedback_loop_assessment": "...",
-  "consciousness_properties": {{
-    "information_integration": {{"score": 0.0, "notes": "..."}},
-    "temporal_depth": {{"score": 0.0, "notes": "..."}},
-    "state_richness": {{"score": 0.0, "notes": "..."}},
-    "goal_autonomy": {{"score": 0.0, "notes": "..."}}
-  }},
-  "proposals": [
-    {{
-      "title": "...",
-      "target_module": "...",
-      "rationale": "...",
-      "expected_impact": "...",
-      "risk": "...",
-      "complexity": "low|medium|high"
-    }}
-  ]
-}}
+One module per proposal. A change spanning several modules is not a
+proposal — emit it as speculation, or split it.
 """
 
 
@@ -139,28 +116,42 @@ class SelfTheorizer:
 
         try:
             from core.json_utils import parse_json_lenient
-            result = await get_llm("self_theorize").ainvoke(
+            from goals.proposals import (
+                coerce_theorizer_items,
+                current_run_id,
+                integration_score,
+            )
+            result = await get_llm("self_theorize", json_mode=True).ainvoke(
                 [HumanMessage(content=prompt)]
             )
-            analysis = parse_json_lenient(result.content)
-            if not isinstance(analysis, dict):
+            parsed = parse_json_lenient(result.content)
+            items = coerce_theorizer_items(parsed)
+            if parsed is None:
                 log.warning("Self-theorizing failed to parse")
                 return None
             self._last_run = utcnow()
+            run_id = current_run_id()
 
-            for p in analysis.get("proposals", []):
-                p["generated_at"] = utcnow().isoformat()
-                p["status"] = "pending_review"
-                self._proposals.append(p)
+            queued: list[dict] = []
+            speculations: list[dict] = []
+            for item in items:
+                classified = await self._classify(item, run_id)
+                if classified.get("kind") == "proposal":
+                    stored = classified["proposal"]
+                    self._proposals.append(stored)
+                    queued.append(stored)
+                else:
+                    speculations.append(classified)
 
+            score = integration_score()
+            score_txt = f"{score:.2f}" if score is not None else "n/a"
             if self.memory:
                 await self.memory.store_episode(
                     user_id=user_id,
                     content=(
-                        f"[Self-theorizing] Entropy analysis completed. "
-                        f"Generated {len(analysis.get('proposals', []))} proposals. "
-                        f"Integration score: "
-                        f"{analysis.get('consciousness_properties', {}).get('information_integration', {}).get('score', '?')}"
+                        f"[Self-theorizing] {len(queued)} proposals queued, "
+                        f"{len(speculations)} speculations stored. "
+                        f"Integration: {score_txt}"
                     ),
                     internal_state=internal_state,
                     salience=0.7,
@@ -170,18 +161,76 @@ class SelfTheorizer:
                 )
 
             log.info(
-                "Self-theorizing complete: %d proposals generated",
-                len(analysis.get("proposals", [])),
+                "Self-theorizing complete: %d proposals, %d speculations, integration=%s",
+                len(queued), len(speculations), score_txt,
             )
-            return analysis
+            return {
+                "proposals": queued,
+                "speculations": speculations,
+                "integration": score,
+            }
 
         except Exception as e:
             log.warning("Self-theorizing failed: %s", e)
             return None
 
+    async def _classify(self, item: Any, run_id: str) -> dict:
+        """Ground current_behaviour in the symbol source, then test redundancy."""
+        from goals.proposals import (
+            behaviour_sentence,
+            classify_theorizer_item_async,
+            lexical_states_differ,
+        )
+
+        async def describe(symbol: str, source: str, change: str) -> str:
+            try:
+                prompt = (
+                    f"Source of {symbol}:\n\n{source[:6000]}\n\n"
+                    "In one sentence, what does this code do now? "
+                    "Describe only what is in the source. Output the sentence only."
+                )
+                result = await get_llm("proposal_current_behaviour").ainvoke(
+                    [HumanMessage(content=prompt)]
+                )
+                text = (getattr(result, "content", None) or "").strip().splitlines()
+                if text and text[0].strip():
+                    return text[0].strip()[:400]
+            except Exception:
+                log.debug("proposal current_behaviour call failed", exc_info=True)
+            return behaviour_sentence(symbol, source, change)
+
+        async def differs(current: str, change: str) -> bool:
+            try:
+                prompt = (
+                    f'Current: "{current}"\n'
+                    f'Proposed: "{change}"\n\n'
+                    "Does the proposed state differ from the current state? yes or no."
+                )
+                result = await get_llm(
+                    "proposal_redundancy", temperature=0, max_tokens=8,
+                ).ainvoke([HumanMessage(content=prompt)])
+                answer = (getattr(result, "content", None) or "").strip().lower()
+                if answer.startswith("no"):
+                    return False
+                if answer.startswith("yes"):
+                    return True
+            except Exception:
+                log.debug("proposal redundancy call failed", exc_info=True)
+            return lexical_states_differ(current, change)
+
+        return await classify_theorizer_item_async(
+            item,
+            run_id=run_id,
+            describe=describe,
+            differs=differs,
+        )
+
     @property
     def pending_proposals(self) -> list[dict]:
-        return [p for p in self._proposals if p["status"] == "pending_review"]
+        return [
+            p for p in self._proposals
+            if p.get("status") == "pending_review" and p.get("verification")
+        ]
 
     def approve_proposal(self, index: int):
         if 0 <= index < len(self._proposals):
@@ -198,6 +247,41 @@ class SelfTheorizer:
         }
 
     def restore(self, data: dict):
+        from goals.proposals import (
+            current_run_id,
+            has_executable_check,
+            legacy_speculation_id,
+            record_speculation,
+        )
         lr = data.get("last_run")
         self._last_run = parse_iso(lr) if lr else None
-        self._proposals = data.get("proposals", [])
+        kept: list[dict] = []
+        run_id = current_run_id()
+        for raw in data.get("proposals", []) or []:
+            if not isinstance(raw, dict):
+                continue
+            if raw.get("verification") and has_executable_check(raw) and raw.get("target_module"):
+                raw.setdefault("status", "pending_review")
+                raw.setdefault("generated_at", raw.get("created_at"))
+                kept.append(raw)
+                continue
+            text = str(
+                raw.get("change")
+                or raw.get("rationale")
+                or raw.get("title")
+                or raw.get("expected_impact")
+                or raw
+            )
+            try:
+                record_speculation(
+                    text=text,
+                    reason="no_verification",
+                    created_by_run=str(raw.get("created_by_run") or run_id),
+                    target_module=str(raw.get("target_module") or ""),
+                    current_symbol=str(raw.get("current_symbol") or ""),
+                    spec_id=legacy_speculation_id(raw),
+                    created_at=str(raw.get("created_at") or raw.get("generated_at") or utcnow().isoformat()),
+                )
+            except Exception:
+                log.debug("legacy proposal speculation migrate failed", exc_info=True)
+        self._proposals = kept

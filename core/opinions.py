@@ -685,12 +685,12 @@ class OpinionRegistry:
             for o in sorted(collab, key=lambda x: -x.conviction)[:3]:
                 parts.append(f"  - [{o.domain}] {o.position}")
 
-        # Independence score
-        score = self.compute_independence_score()
-        parts.append(f"\nIndependence score: {score:.2f}")
-
-        # Drift alerts
-        alerts = self.detect_drift()
+        # Drift alerts. The numeric independence score stays on the
+        # registry and /diag. It is not a chat line.
+        alerts = [
+            a for a in self.detect_drift()
+            if not a.startswith("Independence score")
+        ]
         if alerts:
             parts.append("\nSycophancy alerts:")
             for a in alerts:

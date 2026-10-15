@@ -9,7 +9,7 @@ Step 0 stopped on design/isolation contradictions under §9. Pre-landing planner
 - Branch: `spec-0004-loop-hygiene`.
 - Current commit: this run record's local commit (resolve with `git log -1`); no push.
 - Pre-existing uncommitted changes: untracked `.agent/` and `AGENTS.md`; excluded from this change.
-- Supplied copy: literal `<COPY>` placeholder; no usable absolute copy path supplied. Missing-copy checks alone do not prevent other work under the planner revision.
+- Supplied copy: `/home/keeper-data-copy-20261015` (provided on resume). Directory and required `episodic.db`, `chroma/`, `state/` paths are all missing in this environment (`test -e` checks). No empty replacement was created. Missing-copy checks alone do not prevent other work under the planner revision.
 - Repairs used: 0 in all groups. No implementation tests attempted.
 
 ## Step 0: expected versus actual
@@ -75,6 +75,18 @@ These are independent of the missing-copy exception. No production changes were 
 - Calibration tables, chosen thresholds, script dry-runs, O1–O12 evidence: none yet.
 - Protected files: untouched. No new scripts or production functions, so no changed-function/caller inventory or live repair commands yet.
 
+## Latest resume
+
+- Resume base: `b5c2c57ed8ed09ad9e00c46476682418b6c325d5`; same branch and same unrelated untracked files.
+- Re-read spec and run record. The three requested planner changes are already recorded; corrected V17 table formatting without changing its condition.
+- Checked each supplied copy path with `test -e`; all four are missing. Requested absolute isolation paths are:
+  - `DATA_DIR=/home/keeper-data-copy-20261015`
+  - `MIDTERM_DB_PATH=/home/keeper-data-copy-20261015/episodic.db`
+  - `CHROMA_DB_PATH=/home/keeper-data-copy-20261015/chroma`
+- These are requested path resolutions, not runtime settings verified through an import; no settings import, test, data script, or embedding operation was run. No paths were created or substituted for the supplied copy.
+- The repeated planner revision resolves only independent database paths and missing-copy check blocking. It does not resolve the separate previously recorded step-0 design contradictions. §9's contradiction stop remains active; missing data is not the reason all implementation is paused.
+- Baseline and all V-check statuses remain not-run; no repair attempts consumed. No protected files changed, no push.
+
 ## Resume action
 
-Resolve the step-0 design conflicts through a planner revision, then resume baseline under fully isolated paths (including embedding cache), implement without the spec tool, and proceed with all non-copy-dependent checks. Supply an actual absolute copy path for calibration/data repair/integrated acceptance. Do not mark implemented or accepted while required checks remain unrun.
+Resolve the step-0 design conflicts through a planner revision, then resume baseline under fully isolated paths (including embedding cache), implement without the spec tool, and proceed with all non-copy-dependent checks. Make `/home/keeper-data-copy-20261015` accessible for calibration/data repair/integrated acceptance; its absence alone must not stop other work. Do not mark implemented or accepted while required checks remain unrun.

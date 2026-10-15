@@ -210,8 +210,8 @@ Checks: V12–V16. Exit: V12–V16 pass.
 ## 8. Verification
 
 | Outcome | Change | Check ID: falsifiable condition |
-| Isolation | §6.0 planner revision | V17: each new script prints all three resolved paths and refuses before loading data if either SQLite or Chroma resolves outside `DATA_DIR`; test both escapes and an accepted isolated configuration. |
 |---|---|---|
+| Isolation | §6.0 planner revision | V17: each new script prints all three resolved paths and refuses before loading data if either SQLite or Chroma resolves outside `DATA_DIR`; test both escapes and an accepted isolated configuration. |
 | O1 | §6.1 gate | V1: unit — goal with watermark T and no `user_turn` episode after T → `memory_synthesis ∈ unavailable`; add one user-turn episode after T → absent; goal without watermark → absent. |
 | O2 | §6.1 evidence | V2: unit (LLM mocked) — evidence [one episode] → no write, `SYNTH_REJECT`; two episodes same date → no write; two episodes on two dates → one write with exactly those `source_episode_ids` and `origin=autonomous_synthesis`; missing `evidence` → no write, no exception. |
 | O3 | §6.1 merge | V3: threshold calibration + unit. On the data copy, embed the A set (O4). Record the distribution of each A doc's max cosine to the rest of A, and of max cosine from 200 random non-A docs (or all, if fewer) to A. Set `SEMANTIC_DEDUP_SIM` = highest value t such that ≥90% of A docs have a same-set neighbour ≥ t **and** ≤1% of non-A docs have any A neighbour ≥ t. If no t satisfies both, stop and report the distributions. Unit: two real paraphrases from A → second `store` returns first id, count unchanged, confidence unchanged with no new sources and +0.1 with one new source; an unrelated sentence → new doc. |

@@ -268,8 +268,9 @@ class AutonomousEngine:
                 result = await self.take_research_action(user_id, goal)
                 if result:
                     summary = (
-                        f"Researched and formed opinion: "
-                        f"{result.get('position', '')[:150]}"
+                        f"Research corroborated opinion {result['merged_into']}"
+                        if result.get("merged_into") else
+                        f"Researched and formed opinion: {result.get('position', '')[:150]}"
                     )
                     if result.get("opinion_id"):
                         artifact_refs.append(f"opinion:{result['opinion_id']}")

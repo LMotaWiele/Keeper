@@ -14,7 +14,6 @@ sys.path.insert(0, str(ROOT))
 from config.settings import config  # noqa: E402
 from core.llm import Tier  # noqa: E402
 from core.timeutil import utcnow  # noqa: E402
-from scripts.diag_common import load_companion_no_loops  # noqa: E402
 
 log = logging.getLogger("diag_autonomous")
 
@@ -128,6 +127,9 @@ async def amain() -> None:
     parser.add_argument("--skip-research", action="store_true")
     args = parser.parse_args()
 
+    from scripts.repair_common import require_isolated_paths
+    require_isolated_paths()
+    from scripts.diag_common import load_companion_no_loops
     companion = await load_companion_no_loops()
     user_id = _primary_user_id()
     print(f"loaded companion, user_id={user_id} data_dir={config.data_dir}")
@@ -174,6 +176,8 @@ async def amain() -> None:
     print(f"SearchHealth: {HEALTH.snapshot()}")
     if research and research.get("opinion_id"):
         print("Q: research works standalone: YES (SearXNG + extract + synthesis + opinion). S3 is that nothing calls it.")
+    elif research and research.get("merged_into"):
+        print(f"Q: research works standalone: YES (corroborated opinion {research['merged_into']}; no new episode).")
     elif research is None:
         print("Q: research failed standalone (None). S3 may be inside ResearchEngine/SearXNG, not only the goal system.")
     else:

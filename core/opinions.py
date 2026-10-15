@@ -50,6 +50,8 @@ class Opinion:
     related_evidence: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     source_episode_ids: list[str] = field(default_factory=list)
+    corroborated_count: int = 0
+    last_corroborated_at: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -606,18 +608,20 @@ class OpinionRegistry:
 
         # 4. Zero disagreements
         if len(self._user_known_positions) >= 5:
-            disagreements = [
+            comparable = [
                 o for o in self.opinions.values()
                 if o.domain in self._user_known_positions
                 and o.origin in (OpinionOrigin.INDEPENDENT, OpinionOrigin.EXTERNAL)
                 and o.conviction > 0.5
-                # Check if positions actually differ
-                and not self._positions_align(
+            ]
+            disagreements = [
+                o for o in comparable
+                if not self._positions_align(
                     o.position,
                     self._user_known_positions[o.domain],
                 )
             ]
-            if not disagreements:
+            if len(comparable) >= config.drift_min_comparable and not disagreements:
                 alerts.append(
                     "You don't appear to disagree with the user on any topic "
                     "where you both have positions. This is statistically unlikely "
@@ -737,17 +741,18 @@ class OpinionRegistry:
         return (overlap / max_possible) > 0.5 if max_possible > 0 else True
 
     def _prune(self, protect: str | None = None) -> None:
-        """Drop lowest-conviction opinions. `protect` is never deleted this pass."""
+        """Drop external opinions first. `protect` is never deleted this pass."""
         max_opinions = getattr(config, "max_tracked_opinions", 100)
         if len(self.opinions) <= max_opinions:
             return
 
         by_conviction = sorted(
             ((oid, op) for oid, op in self.opinions.items() if oid != protect),
-            key=lambda kv: kv[1].conviction,
+            key=lambda kv: (kv[1].origin != OpinionOrigin.EXTERNAL, kv[1].conviction),
         )
         to_remove = len(self.opinions) - max_opinions
-        for oid, _ in by_conviction[:to_remove]:
+        for oid, op in by_conviction[:to_remove]:
+            log.info("OPINION_PRUNE origin=%s conviction=%.2f", op.origin.value, op.conviction)
             del self.opinions[oid]
         log.info("Pruned %d low-conviction opinions", to_remove)
 

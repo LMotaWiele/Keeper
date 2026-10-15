@@ -39,7 +39,7 @@ effective_strength = clamp(base × recency + recall_bonus)
 
 `recall_facts` increments `recall_count`, so explicitly retrieved facts resist decay. Prompt assembly only bumps `used_count`.
 
-`format_for_prompt` prefers facts/preferences, drops `User said:` / `Responded:` / `self_observation` lines that overlap the working-memory window, and caps self-observations at 2.
+`format_for_prompt` prefers facts/preferences, drops `User said:` / `Responded:` / `self_observation` lines that overlap the working-memory window, and caps self-observations at 2. Episodes with `source=autonomous_artifact` are excluded by default (`MEMORY_BLOCK_AUTONOMOUS_MAX=0`), so research does not masquerade as memories about the user.
 
 Types: `summary`, `fact`, `event`, `preference`, `note`, `self_observation`, `opinion`, `research`.
 

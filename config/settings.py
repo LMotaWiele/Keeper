@@ -91,7 +91,8 @@ class Settings:
     # V3: 71 incident docs, 200 seeded negatives; >=90% recall, 0% false positives.
     semantic_dedup_sim: float = float(os.getenv("SEMANTIC_DEDUP_SIM", "0.8886954917228408"))
     research_merge_enabled: bool = _bool_env("RESEARCH_MERGE_ENABLED", True)
-    opinion_dup_sim: float = float(os.getenv("OPINION_DUP_SIM", "0.90"))
+    # V8: manually labelled 66 verifier / 31 action-planning positions; no negative hits.
+    opinion_dup_sim: float = float(os.getenv("OPINION_DUP_SIM", "0.8590785323570129"))
     drift_min_comparable: int = int(os.getenv("DRIFT_MIN_COMPARABLE", "3"))
     memory_block_autonomous_max: int = int(os.getenv("MEMORY_BLOCK_AUTONOMOUS_MAX", "0"))
     self_obs_autonomous: bool = _bool_env("SELF_OBS_AUTONOMOUS", False)

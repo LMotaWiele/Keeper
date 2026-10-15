@@ -385,3 +385,265 @@ def test_purge_dry_run_apply_and_idempotence(monkeypatch, tmp_path, capsys):
     asyncio.run(run(apply=True))
     assert invalidate.await_count == 2
     assert "invalidated 0 document(s)" in capsys.readouterr().out
+
+
+# Stage 2: all embeddings, search, loaders and episode writes are mocked.
+from core.opinions import Opinion, OpinionOrigin, OpinionRegistry
+from goals.research import ResearchEngine
+from memory.episodic import EpisodicMemory
+from scripts.compact_opinions import compact_snapshot
+
+
+def make_opinion(oid, origin=OpinionOrigin.EXTERNAL, conviction=0.7, **kwargs):
+    return Opinion(id=oid, domain=kwargs.pop("domain", oid),
+                   position=kwargs.pop("position", f"position {oid}"),
+                   reasoning="evidence", origin=origin, conviction=conviction, **kwargs)
+
+
+@pytest.mark.parametrize("similar,enabled,external", [
+    (True, True, True), (False, True, True),
+    (True, False, True), (True, True, False),
+])
+def test_v6_research_merge_or_novel(monkeypatch, similar, enabled, external, caplog):
+    import goals.research as research_mod
+    import importlib
+    search_mod = importlib.import_module("tools.web_search")
+    import core.jev as jev
+
+    monkeypatch.setattr(config, "research_merge_enabled", enabled)
+    monkeypatch.setattr(config, "opinion_dup_sim", 0.9)
+    registry = OpinionRegistry()
+    existing = make_opinion("old", origin=OpinionOrigin.EXTERNAL if external else OpinionOrigin.COLLABORATIVE,
+                            related_evidence=["source-0", "source-1"])
+    registry.opinions[existing.id] = existing
+    memory = SimpleNamespace(store_episode=AsyncMock(return_value="research-episode"))
+    engine = ResearchEngine(registry, memory)
+    engine._generate_queries = AsyncMock(return_value=["query"])
+    engine._synthesize = AsyncMock(return_value={
+        "position": "new position", "reasoning": "new evidence", "conviction": 0.99,
+        "key_sources": ["source-1"] + [f"source-{i}" for i in range(2, 15)],
+    })
+    monkeypatch.setattr(search_mod, "run_search", AsyncMock(return_value=[{"content": "hit"}]))
+    monkeypatch.setattr(jev, "jev_should_run", AsyncMock(return_value=True))
+    embed = AsyncMock(return_value=[[1, 0], [1, 0] if similar else [0, 1]])
+    monkeypatch.setattr(research_mod, "embed_texts", embed)
+    from memory.episodic import episodic
+    monkeypatch.setattr(episodic, "add_episode_ref", AsyncMock())
+    with caplog.at_level("INFO"):
+        result = asyncio.run(engine.research_topic("topic", user_id=1))
+    if similar and enabled and external:
+        assert result["merged_into"] == "old"
+        assert "opinion_id" not in result and "episode_id" not in result
+        assert len(registry.opinions) == 1
+        assert existing.corroborated_count == 1
+        assert existing.last_corroborated_at
+        assert existing.conviction == 0.7
+        assert existing.related_evidence == [f"source-{i}" for i in range(10)]
+        memory.store_episode.assert_not_awaited()
+        assert "RESEARCH_MERGE" in caplog.text
+    else:
+        assert result["opinion_id"] != "old"
+        assert "merged_into" not in result
+        assert len(registry.opinions) == 2
+        memory.store_episode.assert_awaited_once()
+    if not enabled or not external:
+        embed.assert_not_awaited()
+
+
+def test_v7_prune_external_first_and_protect(monkeypatch):
+    monkeypatch.setattr(config, "max_tracked_opinions", 100)
+    registry = OpinionRegistry()
+    registry.opinions = {str(i): make_opinion(str(i), conviction=0.9) for i in range(98)}
+    for i in ("collab-a", "collab-b"):
+        registry.opinions[i] = make_opinion(i, OpinionOrigin.COLLABORATIVE, 0.1)
+    added = asyncio.run(registry.form_opinion("new", "new", "why", OpinionOrigin.EXTERNAL, 0.01))
+    assert len(registry.opinions) == 100
+    assert {"collab-a", "collab-b", added.id} <= registry.opinions.keys()
+    assert len([o for o in registry.opinions.values() if o.origin == OpinionOrigin.EXTERNAL]) == 98
+
+    monkeypatch.setattr(config, "max_tracked_opinions", 2)
+    registry.opinions = {i: make_opinion(i, OpinionOrigin.COLLABORATIVE, v)
+                         for i, v in (("low", 0.1), ("mid", 0.5), ("protected", 0.01))}
+    registry._prune(protect="protected")
+    assert set(registry.opinions) == {"mid", "protected"}
+
+
+def test_v8_unit_alert_requires_real_comparable_set(monkeypatch):
+    monkeypatch.setattr(config, "drift_min_comparable", 3)
+    registry = OpinionRegistry()
+    registry._user_known_positions = {f"d{i}": "evidence needs verification" for i in range(5)}
+
+    def alerts():
+        return [a for a in registry.detect_drift() if "don't appear to disagree" in a]
+
+    registry.opinions = {str(i): make_opinion(str(i), domain=f"other{i}") for i in range(5)}
+    assert not alerts()
+    registry.opinions = {str(i): make_opinion(str(i), domain=f"d{i}", position="evidence needs verification")
+                         for i in range(3)}
+    assert alerts()
+    registry.opinions["2"].position = "hiking creates happiness"
+    assert not alerts()
+    registry.opinions["2"].position = "evidence needs verification"
+    registry.opinions["2"].conviction = 0.5
+    assert not alerts()
+    registry.opinions["2"].conviction = 0.9
+    registry.opinions["2"].origin = OpinionOrigin.COLLABORATIVE
+    assert not alerts()
+    registry.opinions["2"].origin = OpinionOrigin.INDEPENDENT
+    assert alerts()
+    registry._user_known_positions.pop("d4")  # Preserve existing outer >=5 gate.
+    assert not alerts()
+
+
+def test_v9_new_fields_round_trip_and_legacy():
+    registry = OpinionRegistry()
+    registry.opinions["a"] = make_opinion("a", corroborated_count=4, last_corroborated_at=T.isoformat())
+    snapshot = registry.snapshot()
+    restored = OpinionRegistry()
+    restored.restore(json.loads(json.dumps(snapshot)))
+    assert restored.snapshot() == snapshot
+    del snapshot["opinions"]["a"]["corroborated_count"]
+    del snapshot["opinions"]["a"]["last_corroborated_at"]
+    restored.restore(snapshot)
+    assert restored.opinions["a"].corroborated_count == 0
+    assert restored.opinions["a"].last_corroborated_at is None
+
+
+@pytest.mark.parametrize("cap", [0, 1])
+def test_v10_format_autonomous_cap_before_ranking_budget(monkeypatch, cap):
+    monkeypatch.setattr(config, "memory_block_autonomous_max", cap)
+    monkeypatch.setattr(config, "FORGET_PROMPT_CHAR_BUDGET", 10000)
+    store = EpisodicMemory()
+    rows = [episode(1, source="autonomous_artifact", type="opinion", content="research_completed: alpha"),
+            episode(2, source="autonomous_artifact", type="research", content="research_completed: beta"),
+            episode(3, content="I enjoy visiting mountains.")]
+    store.recall = AsyncMock(return_value=rows)
+    block, ids, stats = asyncio.run(store.format_for_prompt(1, now=T))
+    assert "I enjoy visiting mountains." in block
+    assert sum(text in block for text in ("research_completed: alpha", "research_completed: beta")) == cap
+    assert "ep-3" in ids and stats["ep_kept"] == 1 + cap
+
+
+def compact_fixture():
+    raw = {"opinions": {
+        "a": make_opinion("a", conviction=0.9, corroborated_count=4, related_evidence=["first"]).to_dict(),
+        "b": make_opinion("b", conviction=0.8, corroborated_count=2, related_evidence=["first", "second"]).to_dict(),
+        "c": make_opinion("c", conviction=0.7).to_dict(),
+        "conversation": make_opinion("conversation", OpinionOrigin.COLLABORATIVE).to_dict(),
+    }, "user_known_positions": {"topic": "user stance"}}
+    # Legacy non-external shape must not acquire new fields through restore/save.
+    del raw["opinions"]["conversation"]["corroborated_count"]
+    return raw
+
+
+def test_compact_mass_idempotence_and_raw_nonexternals():
+    raw = compact_fixture()
+    before = json.dumps(raw["opinions"]["conversation"])
+    compacted, clusters = compact_snapshot(raw, [[1, 0], [1, 0], [0, 1]], 0.9)
+    assert clusters == [["a", "b"], ["c"]]
+    assert sorted(i for cluster in clusters for i in cluster) == ["a", "b", "c"]
+    assert len(compacted["opinions"]) == 3
+    canonical = compacted["opinions"]["a"]
+    assert canonical["corroborated_count"] == 7  # 4 + (2 + removed member unit)
+    assert canonical["related_evidence"] == ["first", "second"]
+    for key in ("id", "position", "domain", "conviction"):
+        assert canonical[key] == raw["opinions"]["a"][key]
+    assert json.dumps(compacted["opinions"]["conversation"]) == before
+    assert compacted["user_known_positions"] == raw["user_known_positions"]
+    again, _ = compact_snapshot(compacted, [[1, 0], [0, 1]], 0.9)
+    assert again == compacted
+    assert raw["opinions"]["a"]["corroborated_count"] == 4
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("escape", ["midterm_db_path", "chroma_db_path", "embedding_cache_dir", None])
+def test_v17_compact_guard_before_loader(monkeypatch, capsys, escape, apply):
+    from scripts.compact_opinions import run
+    if escape:
+        monkeypatch.setattr(config, escape, COPY.parent / "escape")
+    loaded = AsyncMock(side_effect=RuntimeError("loader reached after guard"))
+    monkeypatch.setitem(sys.modules, "scripts.diag_common", SimpleNamespace(load_companion_no_loops=loaded))
+    if escape:
+        with pytest.raises(ValueError):
+            asyncio.run(run(apply=apply))
+        loaded.assert_not_awaited()
+    else:
+        with pytest.raises(RuntimeError, match="loader reached after guard"):
+            asyncio.run(run(apply=apply))
+        loaded.assert_awaited_once()
+    output = capsys.readouterr().out
+    for name in ("DATA_DIR", "MIDTERM_DB_PATH", "CHROMA_DB_PATH", "EMBEDDING_CACHE_DIR"):
+        assert name in output
+
+
+def test_compact_dry_apply_embedded_consistency_and_second_apply(monkeypatch, tmp_path, capsys):
+    import scripts.compact_opinions as compact_mod
+    import core.atomic as atomic
+    state = tmp_path / "state"
+    state.mkdir()
+    snapshot = compact_fixture()
+    opinion_path, model_path = state / "opinions.json", state / "self_model.json"
+    opinion_path.write_text(json.dumps(snapshot))
+    model_path.write_text(json.dumps({"version": 13, "_opinions": snapshot}))
+    for attr, value in (("data_dir", tmp_path), ("midterm_db_path", tmp_path / "db"),
+                        ("chroma_db_path", tmp_path / "chroma"), ("embedding_cache_dir", tmp_path / "cache")):
+        monkeypatch.setattr(config, attr, value)
+    monkeypatch.setattr(config, "opinion_dup_sim", 0.9)
+    monkeypatch.setitem(sys.modules, "scripts.diag_common", SimpleNamespace(load_companion_no_loops=AsyncMock()))
+    monkeypatch.setattr(compact_mod, "embed_texts", AsyncMock(side_effect=lambda texts: [
+        [0, 1] if text == "position c" else [1, 0] for text in texts]))
+    writes = []
+    real_write = atomic.atomic_write_text
+
+    def write(path, text):
+        writes.append(path)
+        real_write(path, text)
+
+    monkeypatch.setattr(atomic, "atomic_write_text", write)
+    original = opinion_path.read_bytes(), model_path.read_bytes()
+    asyncio.run(compact_mod.run())
+    assert (opinion_path.read_bytes(), model_path.read_bytes()) == original
+    assert not writes
+    assert "canonical=a members=2" in capsys.readouterr().out
+    asyncio.run(compact_mod.run(apply=True))
+    result = json.loads(opinion_path.read_text())
+    assert json.loads(model_path.read_text())["_opinions"] == result
+    assert len(result["opinions"]) == 3
+    assert result["opinions"]["a"]["corroborated_count"] == 7
+    assert json.dumps(result["opinions"]["conversation"]) == json.dumps(snapshot["opinions"]["conversation"])
+    restored = OpinionRegistry()
+    restored.load(opinion_path)
+    assert len(restored.opinions) == 3
+    assert writes == [opinion_path, model_path]
+    applied = opinion_path.read_bytes(), model_path.read_bytes()
+    asyncio.run(compact_mod.run(apply=True))
+    assert (opinion_path.read_bytes(), model_path.read_bytes()) == applied
+    assert writes == [opinion_path, model_path]
+
+
+def test_compact_preserves_literal_nonexternal_json_tokens():
+    from scripts.compact_opinions import _updated_json
+    raw_record = '{ "origin" : "collaborative", "position": "caf\\u00e9", "conviction": 0.500 }'
+    original = '{"opinions": {"user": ' + raw_record + ', "a": {"origin":"external"}, "b": {"origin":"external"}}, "user_known_positions": { "x" : "y" }}'
+    updated = json.loads(original)
+    del updated["opinions"]["b"]
+    updated["opinions"]["a"]["corroborated_count"] = 1
+    encoded = _updated_json(original, updated)
+    assert json.loads(encoded) == updated
+    assert raw_record in encoded
+    assert '{ "x" : "y" }' in encoded
+    assert _updated_json(encoded, updated) == encoded
+
+
+def test_research_merged_summary_does_not_claim_new_artifacts(monkeypatch):
+    import goals.action_rating
+    engine, goal, _, _, _ = harness(monkeypatch, [])
+    engine.research = SimpleNamespace(research_topic=AsyncMock(return_value={
+        "merged_into": "canonical", "position": "existing position"}))
+    engine.self_model = SimpleNamespace(observe=AsyncMock())
+    monkeypatch.setattr(goals.action_rating, "select_action_type", lambda *a, **k: "web_research")
+    result = asyncio.run(engine.take_action(1))
+    assert result["action"] == "Research corroborated opinion canonical"
+    assert result["artifact_refs"] == []
+    # Stage 2 deliberately preserves observe; its gate belongs to stage 3.
+    engine.self_model.observe.assert_awaited_once()

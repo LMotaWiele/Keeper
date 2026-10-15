@@ -35,8 +35,8 @@ Every `AUTONOMOUS_INTERVAL_MIN` minutes, if no session is active and fatigue is 
 1. Generate 2–3 search queries, including a contrarian one.
 2. Query local SearXNG and extract full pages (`trafilatura`).
 3. Synthesize a position.
-4. `form_opinion(..., origin=EXTERNAL)`.
-5. Store a research episode.
+4. With `RESEARCH_MERGE_ENABLED` (default on), compare the position to existing external opinions using local embeddings and calibrated `OPINION_DUP_SIM`. A near-duplicate corroborates the existing opinion: deduplicated evidence (cap 10), count and timestamp advance, conviction stays unchanged. No new opinion or research episode is created.
+5. Otherwise `form_opinion(..., origin=EXTERNAL)` and store an autonomous research episode. Research artifacts are excluded from the user-memory prompt by default (`MEMORY_BLOCK_AUTONOMOUS_MAX=0`); opinions remain in Opinion awareness.
 
 This is how Keeper gets something to push back *from* that is not the user’s own view reflected back. There is no search quota — token spend is the constraint.
 
@@ -61,7 +61,7 @@ Independence score = conviction-weighted share of independent + external + conte
 
 Periodic review (`OPINION_REVIEW_INTERVAL_MIN`) only considers memories newer than `last_tested` / `formed_at`, so the same old episodes cannot restress-test a stance forever.
 
-Registry cap: `MAX_TRACKED_OPINIONS` (default 100). Lowest conviction is pruned.
+Registry cap: `MAX_TRACKED_OPINIONS` (default 100). External opinions are pruned first, lowest conviction first, before other origins; protected opinions remain protected. The zero-disagreement alert requires at least `DRIFT_MIN_COMPARABLE` (default 3) domain-matched independent/external opinions with conviction >0.5, and no disagreement, in addition to the existing known-position prerequisite.
 
 ## User life (`core/user_life.py`)
 

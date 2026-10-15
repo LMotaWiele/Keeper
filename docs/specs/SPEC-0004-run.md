@@ -2,7 +2,7 @@
 
 ## Status
 
-Stage 1 implemented and verified (V1–V5 and stage-1 V17); stages 2–3 pending. Four-path isolation, preceding-episode classification, and shared observation cleaning are explicit in the spec. Final acceptance remains pending.
+Stages 1–2 implemented and verified (V1–V11 and both scripts' V17); stage 3 pending. Four-path isolation, preceding-episode classification, and shared observation cleaning are explicit in the spec. Final acceptance remains pending.
 
 - Spec: `SPEC-0004-autonomous-loop-hygiene.md`, including this session's user-requested pre-landing planner revision.
 - Run base: `1c06f3c1735b6cabf5e25f2a9f4856ac5c2939e1` (descendant of `21a9136`, verified with `git merge-base --is-ancestor`).
@@ -68,7 +68,7 @@ The three resolved items are not open design conflicts or reasons to stop implem
 
 - Resume baseline: pytest **80 passed**; direct budget/opinions/research/routing passed. Direct `test_goals.py` has a pre-existing failure at `test_invalid_condition_creates_unbounded` (`assert len(new) == 1`); preserved unchanged. Logs: `/tmp/spec0004-baseline.log`, `/tmp/spec0004-baseline-direct-all.log`.
 - Stage 1: V1–V5 passed; 110 pytest checks passed including 30 new mocked checks; direct runners unchanged from baseline. Exit accepted with the recorded pre-existing direct-run failure, not certified as a wholly green direct suite.
-- Stage 2: not started; V6–V11 not-run.
+- Stage 2: V6–V11 passed; pytest 131 passed. One V6 test-namespace repair consumed; direct runners unchanged from baseline.
 - Stage 3: not started; V12–V16 not-run.
 - V17: specified by planner revision; not implemented/not-run.
 - Copy-dependent checks V3, V5, V8, V11, V15, V16 and integrated acceptance: **not-run**, never passed. Correct copy is now present; the former missing-copy blocker is cleared.
@@ -137,6 +137,34 @@ Calibration arrays/IDs and real paraphrase pair: `/tmp/spec0004-calibration-v3.j
 
 Changed stage-1 functions and callers: `AutonomousEngine._synthesis_inputs`, `_synthesis_has_new`, `_synthesize` → `take_action` → `run_loop`; `Goal.to_dict/from_dict` via `GoalSystem.save/load`; `SemanticMemory.store/_reinforce/_register_refs` via autonomous, consolidator, memory facade and memory tools (signatures preserved apart from optional dedup control); similarity helper via purge and later research; purge `run/main/flood_candidates/source_ids`; shared `require_isolated_paths`. Complete functions are available in the local commit diff (`git show`), not copied into this record. Protected-file diff empty. No repair rounds consumed.
 
+## Stage 2 verification
+
+Stage-1 commit `7dc2270`. Stage 2 preserves the conversation opinion-formation path; research merge lives only in `ResearchEngine.research_topic`. Shared helper and guard unchanged. Threshold calibration used the unmodified pre-compaction opinion snapshot.
+
+| Check | Result / evidence |
+|---|---|
+| V6 | PASS: research paraphrase corroborates external only; novel/disabled/non-external cases form new opinions; evidence capped/deduplicated, conviction unchanged, no new episode on merge |
+| V7 | PASS: external-first pruning with mixed/only-nonexternal registries and protected IDs |
+| V8 | PASS: no comparable opinions => no false alert, 3 aligned comparable => alert, disagreement => no alert; calibration below |
+| V9 | PASS: new fields snapshot/restore and legacy defaults |
+| V10 | PASS: autonomous memory default exclusion and configurable cap; user episodes retained |
+| V11 | PASS: dry/apply/repeat on copy, 97 externals → 19 greedy clusters; total 22 with 3 nonexternals unchanged; raw nonexternal JSON value tokens byte-identical; user positions untouched; embedded store equals standalone; loader restores 22; second apply hashes identical |
+| V17 (compact) | PASS: four paths printed, all three escapes rejected before loader for dry/apply, valid isolation accepted |
+| Shared | `python -m pytest -q`: **131 passed**, direct runners unchanged from baseline |
+
+V6 repair round 1: first run had 4 new test failures because `import tools.web_search as search_mod` resolved the package-exported StructuredTool, not the module. Diagnosis: wrong mock target, production not exercised. Fixed only the new tests with `importlib.import_module`; full suite passed on rerun. Logs `/tmp/spec0004-stage2-tests.log`, `/tmp/spec0004-stage2-repair1.log`. No other repairs consumed.
+
+V8 manual labels (all 100 positions read): **external verification / bounded harness self-improvement** 66; **real-world action planning / low-friction progress monitoring** 31; 3 nonexternals. Per-ID labels and distributions in `/tmp/spec0004-calibration-v8.json`; reviewed positions `/tmp/spec0004-opinion-labels.txt`; output `/tmp/spec0004-calibration-v8.log`. Highest threshold meeting >=90% neighbour coverage in each positive cluster is **0.8590785323570129** (the 31-position cluster is binding). Cross-cluster max 0.828051, false matches 0%; three nonexternal max similarities to any external: 0.606805, 0.669913, 0.594830 (all below t). Config default set to t.
+
+| Cluster nearest same-set neighbour | min | p10 | median | p90 | max |
+|---|---|---|---|---|---|
+| action planning (31) | 0.798639 | 0.859079 | 0.896160 | 0.907395 | 0.914347 |
+| verification (66) | 0.867048 | 0.888252 | 0.917132 | 0.935590 | 0.943742 |
+
+Compaction uses the specified greedy **canonical** similarity, not transitive connected components, so 19 canonicals rather than the two broad manually labelled research topics is expected. Largest canonical `c5fe7eaec3a7` had 44 members. Dry-run output `/tmp/spec0004-v11-dry.log`; apply/repeat `/tmp/spec0004-v11-apply.log`, `-repeat.log`; second-apply SHA files `/tmp/spec0004-v11-sha-before`, `-after`. Previous snapshot `/tmp/spec0004-opinions-before.json`. Every external was assigned exactly once.
+
+Stage-2 changed functions/callers: `Opinion.to_dict/from_dict` (dataclass fields), registry `_prune/detect_drift`; `ResearchEngine.research_topic` via autonomous `take_research_action/take_action` and `scripts/diag_autonomous.py`; `EpisodicMemory.format_for_prompt` via memory facade; compaction `compact_snapshot/_updated_json/run/main` via CLI. Full functions in local commit diff. Compaction carries prior corroboration mass instead of resetting counters on rerun; initial copy had zero new counters, so first-run count equals cluster size−1. Atomicity is per file via `core.atomic`, consistent with existing persistence; retry reconciles embedded and authoritative stores. Protected diff empty.
+
 ## Resume action
 
-Proceed to stage 2 after the stage-1 local commit; keep four-path isolation. Then stage 3 and integrated acceptance. Do not mark implemented or accepted while required checks remain unrun.
+Proceed to stage 3 after the stage-2 local commit; keep four-path isolation. Then integrated acceptance. Do not mark implemented or accepted while required checks remain unrun.

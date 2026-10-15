@@ -12,7 +12,10 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
+from config.settings import config
 from core.llm import get_llm
+from core.timeutil import utcnow
+from memory.similarity import embed_texts, nearest
 from core.opinions import OpinionRegistry, OpinionOrigin
 
 log = logging.getLogger(__name__)
@@ -205,6 +208,32 @@ class ResearchEngine:
         if not synthesis:
             log.warning("Failed to synthesize research for: %s", topic)
             return None
+
+        # Research corroborates only externally grounded positions; conversation
+        # opinion formation and its domain-based update path are unchanged.
+        external = [o for o in self.opinions.opinions.values()
+                    if o.origin == OpinionOrigin.EXTERNAL]
+        if config.research_merge_enabled and external:
+            vectors = await embed_texts([synthesis["position"]] + [o.position for o in external])
+            index, similarity = nearest(vectors[0], vectors[1:])
+            if index is not None and similarity >= config.opinion_dup_sim:
+                existing = external[index]
+                existing.related_evidence = list(dict.fromkeys(
+                    existing.related_evidence + synthesis.get("key_sources", [])
+                ))[:10]
+                existing.corroborated_count += 1
+                existing.last_corroborated_at = utcnow().isoformat()
+                log.info("RESEARCH_MERGE opinion=%s sim=%.4f", existing.id, similarity)
+                return {
+                    "merged_into": existing.id,
+                    "topic": topic,
+                    "queries_used": queries[:3],
+                    "sources_found": len(all_results),
+                    "domain": existing.domain,
+                    "position": existing.position,
+                    "conviction": existing.conviction,
+                    "dissenting_view": synthesis.get("dissenting_view", ""),
+                }
 
         # Step 4: Register as external opinion
         opinion = await self.opinions.form_opinion(

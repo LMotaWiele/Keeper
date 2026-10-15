@@ -2,14 +2,14 @@
 
 ## Status
 
-Step 0 stopped on design/isolation contradictions under §9. Pre-landing planner revision recorded in §4, §6.0, §8 (V17), and §9. Implementation has not started; no stage is accepted.
+Pre-landing planner revision synchronized with the user's resolution of all three step-0 stops. Four-path isolation, preceding-episode classification, and shared observation cleaning are now explicit in the spec. Documentation revision committed before resuming implementation; no stage is accepted.
 
 - Spec: `SPEC-0004-autonomous-loop-hygiene.md`, including this session's user-requested pre-landing planner revision.
 - Run base: `1c06f3c1735b6cabf5e25f2a9f4856ac5c2939e1` (descendant of `21a9136`, verified with `git merge-base --is-ancestor`).
 - Branch: `spec-0004-loop-hygiene`.
 - Current commit: this run record's local commit (resolve with `git log -1`); no push.
 - Pre-existing uncommitted changes: untracked `.agent/` and `AGENTS.md`; excluded from this change.
-- Supplied copy: `/home/keeper-data-copy-20261015` (provided on resume). Directory and required `episodic.db`, `chroma/`, `state/` paths are all missing in this environment (`test -e` checks). No empty replacement was created. Missing-copy checks alone do not prevent other work under the planner revision.
+- Supplied copy: `/home/george-contis/keeper-data-copy-20261015` (corrected by user and verified present with `episodic.db`, `chroma/`, and `state/`). The earlier `/home/keeper-data-copy-20261015` path was incorrect. No empty replacement was created.
 - Repairs used: 0 in all groups. No implementation tests attempted.
 
 ## Step 0: expected versus actual
@@ -41,7 +41,7 @@ Read-only source inspection; no live state, secrets, session traces, or embeddin
 | Test runner | Mixed pytest-style tests and direct async runners. Both needed; no tests executed yet | `test_research.py:123–124`, `test_opinions.py:161–162`, `test_patch01.py:37` |
 | Flood size | Live size unverified; action-log cap 50 confirmed | `goals/system.py:190`, `goals/action_rating.py:189–190,268–269` |
 
-### Path report
+### Initial path report (historical; superseded below)
 
 No isolated copy was selected. Shell/default paths, resolved without importing settings or loading `.env`:
 
@@ -54,15 +54,15 @@ EMBEDDING_CACHE_DIR=/home/george-contis/Documents/Keeper/data/fastembed
 
 These are unsafe defaults, NOT an approved copy. Effective settings values after dotenv loading were not inspected. No script or test touching data was run. A synthetic temporary directory has not yet been created.
 
-## Stop conditions / open design conflicts
+## Resolved step-0 stops / implementation observations
 
-1. **Isolation:** `SemanticMemory._get_embeddings` uses independently configured `EMBEDDING_CACHE_DIR`, default `./data/fastembed`. `load_companion_no_loops()` warms embeddings. Three-variable isolation and V17 as requested do not prevent cache writes to live data. Proposed repair: also export an absolute isolated `EMBEDDING_CACHE_DIR`, and extend script path validation/reporting to it (in addition to the required three).
-2. **Session-based degradation:** `TimeSense.snapshot()` serializes only completed `sessions`, not `_current_session`. A missing window cannot establish autonomous origin. Rule (b) can degrade real user-session observations; bounded history also omits old sessions. Proposed repair: treat outside-window candidates as uncertain/report-only unless provenance establishes autonomous origin; retain rule (a) as an automatic degradation rule. This changes the prescribed repair candidate policy and needs a planner decision.
-3. **Clean rebuild:** `generate_hypotheses()` independently reads unfiltered self-observations. Filtering only layer 1 does not ensure O12/V16. Proposed repair: explicitly authorize sharing the degraded filter with hypothesis generation during rebuild.
-4. **Repair verification conflict:** A includes every synthesis artifact regardless of evidence; V5 requires every candidate source-less. A future evidenced artifact makes those requirements conflict. Proposed repair: decide whether V5's source-less assertion is copy-specific (expected historical incident data) or whether A should be restricted. Do not silently change A ∪ B.
-5. **Activity window:** action logs retain at most 50 records per goal. Seven-day counts can only describe retained records, not guaranteed full activity. Proposed clarification: label the block retained-log activity counts.
+1. **Isolation — resolved by planner:** export `EMBEDDING_CACHE_DIR` as a fourth isolated absolute path. Every new script reports all four paths and refuses escapes before loading data; V17 covers SQLite, Chroma, and cache escapes.
+2. **Degradation — resolved by planner:** session windows are removed. Rule (b) uses preceding-episode provenance within 120 seconds. Stop before applying repairs if any rule-(a) match is not classified autonomous, or unclassified observations exceed 10%. Unclassified observations are not automatically degraded.
+3. **Clean rebuild — resolved by planner:** one `_clean_observations` helper feeds layer 1, layer 2, and `generate_hypotheses`.
+4. **Candidate verification observation:** preserve A ∪ B exactly. Verify V5's source-less assertion on the supplied historical copy; do not infer failure from hypothetical future data.
+5. **Activity observation:** action logs are capped at 50 per goal; compute the specified seven-day block from the available logs, without claiming unretained records were counted.
 
-These are independent of the missing-copy exception. No production changes were made to choose policies silently.
+The three resolved items are not open design conflicts or reasons to stop implementation. Classifier safety checks and all other actual required checks remain enforceable.
 
 ## Verification / stage status
 
@@ -71,11 +71,11 @@ These are independent of the missing-copy exception. No production changes were 
 - Stage 2: not started; V6–V11 not-run.
 - Stage 3: not started; V12–V16 not-run.
 - V17: specified by planner revision; not implemented/not-run.
-- Missing-copy dependent checks: V3, V5, V8, V11, V15, V16 and integrated acceptance **blocked/not-run**, never passed. Unit portions may proceed once independent step-0 contradictions are resolved.
+- Copy-dependent checks V3, V5, V8, V11, V15, V16 and integrated acceptance: **not-run**, never passed. Correct copy is now present; the former missing-copy blocker is cleared.
 - Calibration tables, chosen thresholds, script dry-runs, O1–O12 evidence: none yet.
 - Protected files: untouched. No new scripts or production functions, so no changed-function/caller inventory or live repair commands yet.
 
-## Latest resume
+## Earlier resume at e047afd (historical; superseded by planner resolution below)
 
 - Resume base: `b5c2c57ed8ed09ad9e00c46476682418b6c325d5`; same branch and same unrelated untracked files.
 - Re-read spec and run record. The three requested planner changes are already recorded; corrected V17 table formatting without changing its condition.
@@ -84,9 +84,24 @@ These are independent of the missing-copy exception. No production changes were 
   - `MIDTERM_DB_PATH=/home/keeper-data-copy-20261015/episodic.db`
   - `CHROMA_DB_PATH=/home/keeper-data-copy-20261015/chroma`
 - These are requested path resolutions, not runtime settings verified through an import; no settings import, test, data script, or embedding operation was run. No paths were created or substituted for the supplied copy.
-- The repeated planner revision resolves only independent database paths and missing-copy check blocking. It does not resolve the separate previously recorded step-0 design contradictions. §9's contradiction stop remains active; missing data is not the reason all implementation is paused.
+- At that earlier resume, the three design stops were recorded as unresolved. The subsequent explicit planner resolution below supersedes that status; none of the three remains open.
 - Baseline and all V-check statuses remain not-run; no repair attempts consumed. No protected files changed, no push.
+
+## Planner-resolution revision
+
+Resume base: `e047afd249ffbaf5cc64233f4d86947e7a323877`, same branch and unrelated untracked files. User explicitly resolved all three stops. The spec at that revision still contained superseded requirements: §4 line 76 (three paths), §6.0 line 123 (three-path refusal), §6.3 lines 174–175 (layer-1-only filter and session windows), line 177 (unqualified layer-2 preservation), and line 182 (open-session seam). Corresponding §7/§8 checks also required updating. These have been replaced, not retained as alternatives. §9 explicitly records resolution and classifier safety stops. No production or protected files changed; no data-touching tests run for this documentation-only revision.
+
+Required absolute paths for the next data-touching command:
+
+```sh
+export DATA_DIR=/home/george-contis/keeper-data-copy-20261015
+export MIDTERM_DB_PATH=/home/george-contis/keeper-data-copy-20261015/episodic.db
+export CHROMA_DB_PATH=/home/george-contis/keeper-data-copy-20261015/chroma
+export EMBEDDING_CACHE_DIR=/home/george-contis/keeper-data-copy-20261015/fastembed
+```
+
+These are prescribed paths; effective runtime configuration has not yet been imported/verified. Repair counters remain zero.
 
 ## Resume action
 
-Resolve the step-0 design conflicts through a planner revision, then resume baseline under fully isolated paths (including embedding cache), implement without the spec tool, and proceed with all non-copy-dependent checks. Make `/home/keeper-data-copy-20261015` accessible for calibration/data repair/integrated acceptance; its absence alone must not stop other work. Do not mark implemented or accepted while required checks remain unrun.
+Resume from step 0 under the four isolated absolute paths above, run the existing-suite baseline before production edits, then implement stages in order without the spec tool. Do not reopen the three resolved stops. Verify the classifier's 120-second provenance and safety conditions before repairs, and calibrate thresholds against the copy. Do not mark implemented or accepted while required checks remain unrun.

@@ -73,7 +73,9 @@ Deferred (one line each):
 
 ## 4. Grounding
 
-**Pre-landing planner revision:** isolation requires all three independently resolved environment variables. Before any data-touching script or test, export absolute `DATA_DIR=<COPY>`, `MIDTERM_DB_PATH=<COPY>/episodic.db`, and `CHROMA_DB_PATH=<COPY>/chroma`. Report all three resolved paths in step 0; `DATA_DIR` alone does not isolate SQLite or Chroma.
+**Pre-landing planner revision:** isolation requires four independently resolved environment variables. Before any data-touching script or test, export absolute `DATA_DIR=<COPY>`, `MIDTERM_DB_PATH=<COPY>/episodic.db`, `CHROMA_DB_PATH=<COPY>/chroma`, and `EMBEDDING_CACHE_DIR=<COPY>/fastembed`. Report all four resolved paths in step 0; `DATA_DIR` alone does not isolate SQLite, Chroma, or the writable embedding cache. The supplied copy is `/home/george-contis/keeper-data-copy-20261015`.
+
+**Pre-landing planner revision — resolved step-0 stops:** session-window degradation is removed in favour of a preceding-episode classifier with a 120-second window and the safety stops in §6.3/§9. One `_clean_observations` helper supplies layer 1, layer 2, and `generate_hypotheses`. These revisions resolve the three previously recorded isolation, degradation, and hypothesis-reread stops; they are not open design conflicts.
 
 | Fact | Expected | Tag | Source |
 |---|---|---|---|
@@ -92,11 +94,11 @@ Deferred (one line each):
 | Compact observation shape | `"Given '<context[:150]>', responded with: <action[:300]>"` | measured | `core/self_model.py` |
 | Bookkeeping bug | `observations_analysed = len(observations)` (≤50); `run_loop` updates when `observation_count - observations_analysed >= 5` | measured | `core/self_model.py` ~458, ~713 |
 | Freeze cause | Jev `observations_warrant_rewrite` returns skip each hour | agent-verify (hypothesis) | grep runtime logs for `self_model_analysis skipped — jev observations_warrant_rewrite` |
-| Layer-1 input | `episodic.get_recent(limit=50, type="self_observation")`; no tag filter | measured | code |
-| Session windows | `state/environment.json` `time_sense.sessions` (deque maxlen 50), 6 sessions since `first_interaction` 2026-09-22 | measured | live state |
+| Observation inputs | Existing layer-1, layer-2, and hypothesis readers lack a shared degraded filter; route all three through `_clean_observations` | agent-verify | `core/self_model.py`; pre-landing planner revision |
+| Degradation provenance | Classify self-observations from preceding episodes within 120 seconds, not session windows; stop if any rule-(a) match is not classified autonomous or if unclassified observations exceed 10% | agent-verify | episodic copy; pre-landing planner revision |
 | Authoritative opinion store | `opinions.json` loaded after `self_model.json` (which embeds `_opinions`) | agent-verify | `scripts/diag_common.py`, `core/loop.py` startup, `SelfModel.save` |
 | Episode `source` reliability | user turns labelled `user_turn`; unknowns also default to `user_turn` | agent-verify (report distribution by type) | `memory/__init__.py` `_infer_source` |
-| Data paths | Independently resolved `DATA_DIR`, `MIDTERM_DB_PATH`, `CHROMA_DB_PATH`; export absolute paths under the copy and report all three; state lives under `DATA_DIR/state/` | agent-verify | `config/settings.py`; pre-landing planner revision |
+| Data paths | Independently resolved `DATA_DIR`, `MIDTERM_DB_PATH`, `CHROMA_DB_PATH`, `EMBEDDING_CACHE_DIR`; export absolute paths under the copy and report all four; state lives under `DATA_DIR/state/` | agent-verify | `config/settings.py`; pre-landing planner revision |
 | Test runner | `python test_patchNN.py` or pytest | agent-verify | existing `test_*.py` |
 | Live flood size | ~70 synthesis doc IDs in `goals.json` `action_log[].artifact_refs` (log capped at 50/goal) | measured | live state |
 
@@ -120,7 +122,8 @@ Three writers, three readers, one shared helper.
 - **Stage 3** writer `AutonomousEngine` → `SelfModel.observe` (removed) → reader `SelfModel._layer1_observation_update`; new deterministic activity block from `goals.json` action logs.
 - **Config** (`config/settings.py`, env-driven like existing flags): `SYNTH_GATE_ENABLED=true`, `SYNTH_MIN_EVIDENCE_EPISODES=2`, `SYNTH_MIN_EVIDENCE_DAYS=2`, `SEMANTIC_DEDUP_SIM` (default set from V3), `RESEARCH_MERGE_ENABLED=true`, `OPINION_DUP_SIM` (default set from V8), `DRIFT_MIN_COMPARABLE=3`, `MEMORY_BLOCK_AUTONOMOUS_MAX=0`, `SELF_OBS_AUTONOMOUS=false`.
 - **Trace:** one `log.info` line per decision with fixed prefixes: `SYNTH_GATE`, `SYNTH_REJECT`, `SEM_MERGE`, `RESEARCH_MERGE`, `OPINION_PRUNE`, `SELFMODEL_SKIP`.
-- **Pre-landing planner revision — script isolation:** every new script prints the three resolved paths first and refuses to run unless `MIDTERM_DB_PATH` and `CHROMA_DB_PATH` are under `DATA_DIR`. Before any data-touching script or test, export absolute paths for all three variables. Thresholds remain config values until calibrated; missing-copy calibration is not a pass.
+- **Pre-landing planner revision — script isolation:** every new script prints all four resolved paths first and refuses to run unless `MIDTERM_DB_PATH`, `CHROMA_DB_PATH`, and `EMBEDDING_CACHE_DIR` are under `DATA_DIR`. Before any data-touching script or test, export absolute paths for all four variables. Thresholds remain config values until calibrated; missing-copy calibration is not a pass.
+- **Pre-landing planner revision — observation provenance:** one `_clean_observations` helper excludes degraded episodes for layer 1, layer 2, and `generate_hypotheses`. The repair script uses the preceding-episode classifier in §6.3, never session windows.
 - No walking skeleton: this is a fix to existing paths; each stage is exercised end to end by its own checks.
 - Update `docs/memory.md` and `docs/goals-and-self.md` where described behaviour changes; preserve unrelated content.
 
@@ -171,15 +174,15 @@ Depends on: none functionally; ordered last by impact. Outcomes: O10–O12. Wher
 Changes:
 - **Corpus (O10).** When `SELF_OBS_AUTONOMOUS` is false (default), `take_action` does not call `self_model.observe`. `_layer1_observation_update` adds a deterministic block to the analysis prompt: autonomous action counts over the last 7 days by `action_type` × outcome (artifact produced / nothing), computed from goal `action_log`s, labelled as harness activity ("what the autonomous scheduler did, not what you said"). Add the `{autonomous_activity}` slot to `ANALYSIS_PROMPT`.
 - **Bookkeeping (O11).** After a successful analysis **and** after a Jev skip, set `observations_analysed = observation_count`. Trace `SELFMODEL_SKIP reason=jev` on skip.
-- **Degraded filter.** Layer-1 input excludes episodes tagged `degraded` (over-fetch then filter, or a tag filter on `get_recent`; preserve `get_recent` default behaviour for other callers).
-- **Repair + rebuild script (O12).** `scripts/degrade_autonomous_observations.py`, dry-run default. Rule (a): `self_observation` episodes whose content contains `"Given 'Goal: "`. Rule (b): `self_observation` episodes whose `created_at` falls outside every session window in `environment.json` `time_sense.sessions`, padded ±5 minutes. `--apply` tags `degraded` and scales importance ×0.1 (same as `purge_preambles.py`). `--rebuild` (requires `--apply` already done on that data): if ≥5 non-degraded observations remain, run layer 1 once with the Jev gate bypassed and `previous_model_context` empty, then `generate_hypotheses`; v13 remains in `_recursion_guard.model_history`. If <5 remain, do nothing and report the count. Dry-run prints counts per rule and per session window.
+- **Degraded filter — pre-landing planner revision.** One `_clean_observations` helper excludes episodes tagged `degraded` and supplies layer 1, layer 2, and `generate_hypotheses` (over-fetch then filter, or a tag filter on `get_recent`; preserve `get_recent` default behaviour for other callers).
+- **Repair + rebuild script (O12) — pre-landing planner revision.** `scripts/degrade_autonomous_observations.py`, dry-run default. Rule (a): `self_observation` episodes whose content contains `"Given 'Goal: "`. Rule (b): use a preceding-episode provenance classifier with a 120-second window to identify autonomous self-observations; session windows are not used. Validate the classifier before applying repairs: stop if any rule-(a) match is not classified autonomous, or if unclassified observations exceed 10% of observations evaluated. Unclassified observations are not automatically degraded. `--apply` tags autonomous-derived candidates `degraded` and scales importance ×0.1 (same as `purge_preambles.py`). `--rebuild` (requires `--apply` already done on that data): if ≥5 non-degraded observations remain, run layer 1 once with the Jev gate bypassed and `previous_model_context` empty, then `generate_hypotheses` using the same cleaned corpus helper; v13 remains in `_recursion_guard.model_history`. If <5 remain, do nothing and report the count. Dry-run prints counts per rule and classifier outcome, including unclassified count and percentage and rule-(a) validation.
 
-Preserve: conversation-reply observation path (`core/loop.py` ~560); layers 2 and 3; hypothesis gating (`eligible_hypotheses`, speculation recording); `to_prompt_context` format.
+Preserve: conversation-reply observation path (`core/loop.py` ~560); layer-2 behaviour except routing observations through `_clean_observations`; layer 3; hypothesis gating (`eligible_hypotheses`, speculation recording); `to_prompt_context` format.
 
 Seams:
 - `ANALYSIS_PROMPT.format` gets a new kwarg; every call site must pass it.
 - Rebuild runs outside the live process via `load_companion_no_loops()` and must save state the same way the live process does.
-- Session windows: a session with `ended_at = null` (current) extends to now.
+- Preceding-episode classifier: use episode provenance within the preceding 120 seconds; no session-history inference. The rule-(a) validation and >10% unclassified stops apply before any repair writes.
 
 Checks: V12–V16. Exit: V12–V16 pass.
 
@@ -204,14 +207,14 @@ Checks: V12–V16. Exit: V12–V16 pass.
 | autonomous observe disabled | web_research succeeds | V12 |
 | Jev skip | gate returns skip | V13 |
 | rebuild with <5 clean observations | sparse corpus | V15 |
-| open current session (`ended_at` null) | live state | V15 |
+| preceding-episode provenance and safety stops | 120-second boundary; rule-(a) mismatch; >10% unclassified | V15 |
 | retry/cancel/timeouts | — | not exercised: no new network calls; embeddings are local |
 
 ## 8. Verification
 
 | Outcome | Change | Check ID: falsifiable condition |
 |---|---|---|
-| Isolation | §6.0 planner revision | V17: each new script prints all three resolved paths and refuses before loading data if either SQLite or Chroma resolves outside `DATA_DIR`; test both escapes and an accepted isolated configuration. |
+| Isolation | §6.0 planner revision | V17: each new script prints all four resolved paths and refuses before loading data if SQLite, Chroma, or embedding cache resolves outside `DATA_DIR`; test each escape and an accepted isolated configuration. |
 | O1 | §6.1 gate | V1: unit — goal with watermark T and no `user_turn` episode after T → `memory_synthesis ∈ unavailable`; add one user-turn episode after T → absent; goal without watermark → absent. |
 | O2 | §6.1 evidence | V2: unit (LLM mocked) — evidence [one episode] → no write, `SYNTH_REJECT`; two episodes same date → no write; two episodes on two dates → one write with exactly those `source_episode_ids` and `origin=autonomous_synthesis`; missing `evidence` → no write, no exception. |
 | O3 | §6.1 merge | V3: threshold calibration + unit. On the data copy, embed the A set (O4). Record the distribution of each A doc's max cosine to the rest of A, and of max cosine from 200 random non-A docs (or all, if fewer) to A. Set `SEMANTIC_DEDUP_SIM` = highest value t such that ≥90% of A docs have a same-set neighbour ≥ t **and** ≤1% of non-A docs have any A neighbour ≥ t. If no t satisfies both, stop and report the distributions. Unit: two real paraphrases from A → second `store` returns first id, count unchanged, confidence unchanged with no new sources and +0.1 with one new source; an unrelated sentence → new doc. |
@@ -225,8 +228,8 @@ Checks: V12–V16. Exit: V12–V16 pass.
 | O9 | §6.2 script | V11: dry-run on copy prints clusters; every external opinion is in exactly one cluster; `--apply` on copy → count = clusters + non-external; non-external opinions byte-identical; registry loads via `load_companion_no_loops()`. |
 | O10 | §6.3 corpus | V12: unit — successful `web_research` with `SELF_OBS_AUTONOMOUS=false` does not call `observe`; analysis prompt contains the activity block computed from a fixture action log. |
 | O11 | §6.3 bookkeeping | V13: unit — after analysis and after Jev skip, `observations_analysed == observation_count`; `run_loop` does not call `update_model` until 5 more observations. |
-| O12 | §6.3 filter | V14: unit — layer-1 input excludes `degraded` episodes. |
-| O12 | §6.3 script | V15: dry-run on copy prints counts for rules (a) and (b); no degraded candidate has content beginning `self_observation: Given '` with non-`Goal:` context **and** a `created_at` inside a session window; `--apply` then `--rebuild` on copy produces v14, or reports <5 and changes nothing. |
+| O12 | §6.3 filter | V14: unit — layer 1, layer 2, and `generate_hypotheses` all use `_clean_observations` and exclude `degraded` episodes. |
+| O12 | §6.3 script | V15: dry-run on copy prints rule-(a) and preceding-episode classifier counts using the 120-second window, with unclassified percentage; stop before writes if any rule-(a) match is not autonomous or unclassified exceeds 10%; unclassified observations are not degraded. Exercise the window boundary and both stop conditions. `--apply` then `--rebuild` on copy produces v14, or reports <5 and changes nothing. |
 | O10, O12 | §6.3 rebuild | V16: if V15 rebuilt, v14 JSON contains no `"Researched and formed opinion"` and no hypothesis mentions it; `model_history` contains v13. |
 
 You write and run the commands. Protected (never edit, skip or weaken to pass): `test_budget.py`, `test_context_time.py`, `test_goals.py`, `test_opinions.py`, `test_patch01.py`, `test_patch02.py`, `test_patch03.py`, `test_research.py`, `test_routing_v2.py`, their copies under `docs/`, `SOUL.md`/`SOUL.md.example`, and the live `DATA_DIR`. New tests go in `test_patch04.py`.
@@ -247,7 +250,10 @@ Resume baseline: run the existing suite before editing in any session; record pr
 
 Repairs: a repair round is a coherent diagnosis, a scoped fix and a rerun of affected checks. Up to three rounds per failed check group per stage. Don't reset counts by restarting sessions, renaming checks or cosmetically varying an attempt.
 
+**Pre-landing planner revision:** the previously recorded embedding-cache, session-window degradation, and hypothesis-reread stops are resolved by four-variable isolation, preceding-episode classification, and the shared `_clean_observations` helper. Do not reopen them as unresolved design conflicts. Before data-touching scripts/tests, export all four isolated absolute paths; scripts must report and validate them (V17).
+
 Stop and report instead when:
+- the preceding-episode classifier labels any rule-(a) match other than autonomous, or leaves >10% of evaluated self-observations unclassified; do not apply degradation repairs in either case;
 - a step-0 contradiction changes design, outcomes, scope or verification;
 - a seam differs from §6;
 - V3 or V8 finds no threshold satisfying its rule;

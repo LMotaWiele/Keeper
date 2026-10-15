@@ -73,6 +73,8 @@ Deferred (one line each):
 
 ## 4. Grounding
 
+**Pre-landing planner revision:** isolation requires all three independently resolved environment variables. Before any data-touching script or test, export absolute `DATA_DIR=<COPY>`, `MIDTERM_DB_PATH=<COPY>/episodic.db`, and `CHROMA_DB_PATH=<COPY>/chroma`. Report all three resolved paths in step 0; `DATA_DIR` alone does not isolate SQLite or Chroma.
+
 | Fact | Expected | Tag | Source |
 |---|---|---|---|
 | Start revision | `main` at `21a9136` or later | measured | `git log -1` |
@@ -94,7 +96,7 @@ Deferred (one line each):
 | Session windows | `state/environment.json` `time_sense.sessions` (deque maxlen 50), 6 sessions since `first_interaction` 2026-09-22 | measured | live state |
 | Authoritative opinion store | `opinions.json` loaded after `self_model.json` (which embeds `_opinions`) | agent-verify | `scripts/diag_common.py`, `core/loop.py` startup, `SelfModel.save` |
 | Episode `source` reliability | user turns labelled `user_turn`; unknowns also default to `user_turn` | agent-verify (report distribution by type) | `memory/__init__.py` `_infer_source` |
-| Data paths | `DATA_DIR=./data`, `episodic.db`, `chroma/`, `state/` | agent-verify | `config/settings.py` |
+| Data paths | Independently resolved `DATA_DIR`, `MIDTERM_DB_PATH`, `CHROMA_DB_PATH`; export absolute paths under the copy and report all three; state lives under `DATA_DIR/state/` | agent-verify | `config/settings.py`; pre-landing planner revision |
 | Test runner | `python test_patchNN.py` or pytest | agent-verify | existing `test_*.py` |
 | Live flood size | ~70 synthesis doc IDs in `goals.json` `action_log[].artifact_refs` (log capped at 50/goal) | measured | live state |
 
@@ -118,6 +120,7 @@ Three writers, three readers, one shared helper.
 - **Stage 3** writer `AutonomousEngine` → `SelfModel.observe` (removed) → reader `SelfModel._layer1_observation_update`; new deterministic activity block from `goals.json` action logs.
 - **Config** (`config/settings.py`, env-driven like existing flags): `SYNTH_GATE_ENABLED=true`, `SYNTH_MIN_EVIDENCE_EPISODES=2`, `SYNTH_MIN_EVIDENCE_DAYS=2`, `SEMANTIC_DEDUP_SIM` (default set from V3), `RESEARCH_MERGE_ENABLED=true`, `OPINION_DUP_SIM` (default set from V8), `DRIFT_MIN_COMPARABLE=3`, `MEMORY_BLOCK_AUTONOMOUS_MAX=0`, `SELF_OBS_AUTONOMOUS=false`.
 - **Trace:** one `log.info` line per decision with fixed prefixes: `SYNTH_GATE`, `SYNTH_REJECT`, `SEM_MERGE`, `RESEARCH_MERGE`, `OPINION_PRUNE`, `SELFMODEL_SKIP`.
+- **Pre-landing planner revision — script isolation:** every new script prints the three resolved paths first and refuses to run unless `MIDTERM_DB_PATH` and `CHROMA_DB_PATH` are under `DATA_DIR`. Before any data-touching script or test, export absolute paths for all three variables. Thresholds remain config values until calibrated; missing-copy calibration is not a pass.
 - No walking skeleton: this is a fix to existing paths; each stage is exercised end to end by its own checks.
 - Update `docs/memory.md` and `docs/goals-and-self.md` where described behaviour changes; preserve unrelated content.
 
@@ -207,6 +210,7 @@ Checks: V12–V16. Exit: V12–V16 pass.
 ## 8. Verification
 
 | Outcome | Change | Check ID: falsifiable condition |
+| Isolation | §6.0 planner revision | V17: each new script prints all three resolved paths and refuses before loading data if either SQLite or Chroma resolves outside `DATA_DIR`; test both escapes and an accepted isolated configuration. |
 |---|---|---|
 | O1 | §6.1 gate | V1: unit — goal with watermark T and no `user_turn` episode after T → `memory_synthesis ∈ unavailable`; add one user-turn episode after T → absent; goal without watermark → absent. |
 | O2 | §6.1 evidence | V2: unit (LLM mocked) — evidence [one episode] → no write, `SYNTH_REJECT`; two episodes same date → no write; two episodes on two dates → one write with exactly those `source_episode_ids` and `origin=autonomous_synthesis`; missing `evidence` → no write, no exception. |
@@ -249,10 +253,10 @@ Stop and report instead when:
 - V3 or V8 finds no threshold satisfying its rule;
 - scope would need to grow;
 - a protected file looks wrong;
-- a live data copy is unavailable (mark dependent checks blocked/not-run, never passed);
+- **Pre-landing planner revision:** a missing live-data copy blocks only V3, V5, V8, V11, V15, V16 and integrated acceptance (mark blocked checks not-run, never passed). All other implementation and verification proceeds; thresholds stay config values until calibrated. This overrides copy-dependent stage-exit stops, but never permits marking a blocked stage accepted;
 - the same failure repeats without a new testable diagnosis, or the budget is exhausted.
 
-Continuation: maintain `/docs/specs/SPEC-0004-run.md` (status, spec revision, run base, current commit, per-stage status, checks with evidence pointers, repairs used, open work, resume action). Update it after each stage exit, each repair round, and before ending a session. Resume by reading this spec, the run record and git state, then running the resume baseline. Never advance past a failing required check. Continuous mode: proceed through stages without approval; one local commit per stage is fine.
+Continuation: maintain `/docs/specs/SPEC-0004-run.md` (status, spec revision, run base, current commit, per-stage status, checks with evidence pointers, repairs used, open work, resume action). Update it after each stage exit, each repair round, and before ending a session. Resume by reading this spec, the run record and git state, then running the resume baseline. Never advance past a failing required check. Under the pre-landing planner revision, missing-copy checks are blocked/not-run, not failed; proceed with other work while leaving stage acceptance pending. Continuous mode: proceed through stages without approval; one local commit per stage is fine.
 
 Never mark an unrun check as passed. Never run `--apply` against the live `DATA_DIR`.
 

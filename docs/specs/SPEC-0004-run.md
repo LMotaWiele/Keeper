@@ -2,7 +2,7 @@
 
 ## Status
 
-Pre-landing planner revision synchronized with the user's resolution of all three step-0 stops. Four-path isolation, preceding-episode classification, and shared observation cleaning are now explicit in the spec. Documentation revision committed before resuming implementation; no stage is accepted.
+Stage 1 implemented and verified (V1–V5 and stage-1 V17); stages 2–3 pending. Four-path isolation, preceding-episode classification, and shared observation cleaning are explicit in the spec. Final acceptance remains pending.
 
 - Spec: `SPEC-0004-autonomous-loop-hygiene.md`, including this session's user-requested pre-landing planner revision.
 - Run base: `1c06f3c1735b6cabf5e25f2a9f4856ac5c2939e1` (descendant of `21a9136`, verified with `git merge-base --is-ancestor`).
@@ -10,7 +10,7 @@ Pre-landing planner revision synchronized with the user's resolution of all thre
 - Current commit: this run record's local commit (resolve with `git log -1`); no push.
 - Pre-existing uncommitted changes: untracked `.agent/` and `AGENTS.md`; excluded from this change.
 - Supplied copy: `/home/george-contis/keeper-data-copy-20261015` (corrected by user and verified present with `episodic.db`, `chroma/`, and `state/`). The earlier `/home/keeper-data-copy-20261015` path was incorrect. No empty replacement was created.
-- Repairs used: 0 in all groups. No implementation tests attempted.
+- Repairs used: 0 in all stage-1 groups. Baseline and stage-1 checks recorded below.
 
 ## Step 0: expected versus actual
 
@@ -66,14 +66,14 @@ The three resolved items are not open design conflicts or reasons to stop implem
 
 ## Verification / stage status
 
-- Resume baseline: **not-run**, stopped at source-only grounding before data-touching imports due isolation contradiction. No pre-existing test failures have been inferred.
-- Stage 1: not started; V1–V5 not-run.
+- Resume baseline: pytest **80 passed**; direct budget/opinions/research/routing passed. Direct `test_goals.py` has a pre-existing failure at `test_invalid_condition_creates_unbounded` (`assert len(new) == 1`); preserved unchanged. Logs: `/tmp/spec0004-baseline.log`, `/tmp/spec0004-baseline-direct-all.log`.
+- Stage 1: V1–V5 passed; 110 pytest checks passed including 30 new mocked checks; direct runners unchanged from baseline. Exit accepted with the recorded pre-existing direct-run failure, not certified as a wholly green direct suite.
 - Stage 2: not started; V6–V11 not-run.
 - Stage 3: not started; V12–V16 not-run.
 - V17: specified by planner revision; not implemented/not-run.
 - Copy-dependent checks V3, V5, V8, V11, V15, V16 and integrated acceptance: **not-run**, never passed. Correct copy is now present; the former missing-copy blocker is cleared.
-- Calibration tables, chosen thresholds, script dry-runs, O1–O12 evidence: none yet.
-- Protected files: untouched. No new scripts or production functions, so no changed-function/caller inventory or live repair commands yet.
+- Stage-1 calibration, dry-run and O1–O4 evidence below; O5–O12 pending.
+- Protected files: untouched. Stage-1 changed-function inventory below; final live repair commands will be recorded after all scripts exist.
 
 ## Earlier resume at e047afd (historical; superseded by planner resolution below)
 
@@ -102,6 +102,41 @@ export EMBEDDING_CACHE_DIR=/home/george-contis/keeper-data-copy-20261015/fastemb
 
 These are prescribed paths; effective runtime configuration has not yet been imported/verified. Repair counters remain zero.
 
+## Implementation resume: stage 1
+
+Start revision `64f6620`; unrelated untracked `.agent/` and `AGENTS.md` excluded. All four effective settings paths were printed and confirmed equal to the prescribed copy paths before baseline. CPU-only embeddings used the copy's cache; no GPU work or live state writes.
+
+Grounding additions from the copy (earlier table is historical):
+- Source distribution `(type, source, count)`: event/autonomous_artifact 48; event/keeper_response 10; event/user_turn 32; fact/user_turn 4; opinion/autonomous_artifact 115; preference/user_turn 3; research/autonomous_artifact 91; self_observation/self_observation 93.
+- Goal logs: two active goals, 50 records each, respectively 36 and 38 synthesis entries; unique referenced A documents 71, all present. Approximate spec incident count is consistent.
+- Jev-skip evidence now verified in copy `logs/keeper.log`, including `2026-10-14 12:46:22,907`, `2026-10-15 01:03:24,525`, `2026-10-15 01:33:25,855`. Repeated skips confirmed; not literally an hourly-only cadence.
+- Standalone opinions and embedded persistence source expectations remain confirmed by source inspection. Classifier provenance validation is scheduled for stage 3.
+
+### Stage-1 verification
+
+Commands use the four exports above, `.venv/bin/python`, and repository cwd.
+
+| Check | Result / evidence |
+|---|---|
+| V1 | PASS: watermark selection exclusion/new input/legacy eligibility; save/load; source query across >100 internal rows (`test_patch04.py`) |
+| V2 | PASS: malformed JSON/shapes/indices, one episode, same Amsterdam date rejected; two-day sources and origin stored; rejection advances watermark |
+| V3 | PASS: actual CPU embedding calibration below; real incident paraphrases merged in temporary Chroma, no confidence gain without sources, +0.1 with new source, unrelated sentence new; mocked exact/None/invalidated/empty cases |
+| V4 | PASS: 10 cycles with single bedtime turn and autonomous artifacts, zero writes, one rejected synthesis call |
+| V5 | PASS: dry-run A=71, B=77, union=77; all candidates source-less; apply invalidated 77; repeat invalidated 0; search returned no candidate IDs |
+| V17 (purge) | PASS: each of three path escapes refuses before loader, all four paths printed; valid isolation reaches loader; remaining scripts checked in their stages |
+| Shared | `python -m pytest -q`: **110 passed**; direct runners retain baseline results (only pre-existing direct goals failure) |
+
+V3 calibration: fresh embeddings via existing BAAI/bge-small-en-v1.5 embedder; random seed 4; 71 A documents, 200 non-A documents. Highest admissible t = **0.8886954917228408**, positive neighbour recall 64/71 (90.1408%), negative matches 0/200. Config default set to t.
+
+| Distribution | min | p10 | median | p90 | p99 | max |
+|---|---|---|---|---|---|---|
+| A nearest other A | 0.844429 | 0.888695 | 0.942765 | 0.981917 | — | 0.999456 |
+| sampled non-A nearest A | 0.559458 | — | 0.677580 | 0.735855 | 0.769494 | 0.809616 |
+
+Calibration arrays/IDs and real paraphrase pair: `/tmp/spec0004-calibration-v3.json`; output `/tmp/spec0004-calibration-v3.log`. Actual incident pair differs by “without pushing back” / “without pushback”. V5 output: `/tmp/spec0004-v5-dry.log`, `-apply.log`, `-repeat.log`. Sample candidate `07ecc48554137bbb` escalates the single bedtime message into a recurring sleep-for-intellectual-momentum pattern. 1161 other source-less documents untouched. Script safety refuses evidenced A candidates rather than silently weakening A ∪ B (none encountered).
+
+Changed stage-1 functions and callers: `AutonomousEngine._synthesis_inputs`, `_synthesis_has_new`, `_synthesize` → `take_action` → `run_loop`; `Goal.to_dict/from_dict` via `GoalSystem.save/load`; `SemanticMemory.store/_reinforce/_register_refs` via autonomous, consolidator, memory facade and memory tools (signatures preserved apart from optional dedup control); similarity helper via purge and later research; purge `run/main/flood_candidates/source_ids`; shared `require_isolated_paths`. Complete functions are available in the local commit diff (`git show`), not copied into this record. Protected-file diff empty. No repair rounds consumed.
+
 ## Resume action
 
-Resume from step 0 under the four isolated absolute paths above, run the existing-suite baseline before production edits, then implement stages in order without the spec tool. Do not reopen the three resolved stops. Verify the classifier's 120-second provenance and safety conditions before repairs, and calibrate thresholds against the copy. Do not mark implemented or accepted while required checks remain unrun.
+Proceed to stage 2 after the stage-1 local commit; keep four-path isolation. Then stage 3 and integrated acceptance. Do not mark implemented or accepted while required checks remain unrun.

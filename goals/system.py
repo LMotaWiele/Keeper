@@ -98,6 +98,8 @@ class Goal:
     created_at: datetime = field(default_factory=utcnow)
     completed_at: datetime | None = None
     last_pursued: datetime | None = None
+    last_synthesis_at: datetime | None = None
+    last_synthesis_episode_at: datetime | None = None
 
     # Context
     tags: list[str] = field(default_factory=list)
@@ -180,6 +182,8 @@ class Goal:
             "created_at": self.created_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "last_pursued": self.last_pursued.isoformat() if self.last_pursued else None,
+            "last_synthesis_at": self.last_synthesis_at.isoformat() if self.last_synthesis_at else None,
+            "last_synthesis_episode_at": self.last_synthesis_episode_at.isoformat() if self.last_synthesis_episode_at else None,
             "tags": self.tags,
             "context": self.context[:200],
             "kind": self.kind,
@@ -223,6 +227,10 @@ class Goal:
             g.completed_at = parse_iso(d["completed_at"])
         if d.get("last_pursued"):
             g.last_pursued = parse_iso(d["last_pursued"])
+        if d.get("last_synthesis_at"):
+            g.last_synthesis_at = parse_iso(d["last_synthesis_at"])
+        if d.get("last_synthesis_episode_at"):
+            g.last_synthesis_episode_at = parse_iso(d["last_synthesis_episode_at"])
         return g
 
 

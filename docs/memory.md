@@ -47,7 +47,9 @@ Types: `summary`, `fact`, `event`, `preference`, `note`, `self_observation`, `op
 
 ChromaDB + local `fastembed` embeddings (`BAAI/bge-small-en-v1.5`, 384-d), collection `semantic_v2_user_{id}` so old 1536-d directories cannot collide. Documents are **patterns**, not transcripts. Embedding runs in a worker thread so Telegram polling is not blocked.
 
-Same text hashes to the same id. A repeat **reinforces** (confidence +0.1, merged source episode ids) instead of duplicating. Contradictions `invalidate()` a pattern; cleanup can delete invalidated rows later.
+Same text hashes to the same id. Exact repeats and near-duplicates (cosine ≥ `SEMANTIC_DEDUP_SIM`, calibrated on the incident copy) **reinforce** rather than duplicate: source episode IDs are merged and the reinforcement count advances. Confidence rises +0.1 only when at least one new source episode is added. Explicit `dedup_sim=None` disables similarity matching, not exact dedup. Invalidated documents are excluded from similarity matching. Contradictions `invalidate()` a pattern; cleanup can delete invalidated rows later.
+
+Autonomous synthesis considers user-turn evidence only. Per-goal persisted input watermarks prevent reruns without a new user turn (`SYNTH_GATE_ENABLED`). A pattern requires at least two cited episodes on two Europe/Amsterdam dates; malformed or insufficient evidence is rejected, and considered input advances the watermark even on rejection. Stored patterns carry source IDs and `origin=autonomous_synthesis`.
 
 Search over-fetches, drops invalidated/low-confidence hits, then ranks `0.6 * relevance + 0.4 * confidence`.
 

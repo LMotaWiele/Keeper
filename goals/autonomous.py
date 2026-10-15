@@ -74,6 +74,100 @@ class AutonomousEngine:
             return None
         return result
 
+    async def _synthesis_inputs(self, user_id: int) -> list[dict]:
+        """Read user evidence directly: no recall window can hide a new turn.
+
+        Legacy rows defaulted to user_turn even for internal episode types.
+        Require the source AND reject those types before using the watermark.
+        """
+        import aiosqlite
+        from config.settings import config
+        from memory.episodic import episodic
+
+        path = getattr(getattr(self.memory, "episodic", None), "db_path", None)
+        path = path or episodic.db_path or str(config.midterm_db_path)
+        async with aiosqlite.connect(path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM episodes WHERE user_id = ? AND source = 'user_turn' "
+                "AND type NOT IN ('self_observation', 'keeper_response', "
+                "'environment_event', 'tool_result', 'autonomous_artifact', 'research', 'opinion')",
+                (user_id,),
+            ) as cursor:
+                rows = [dict(row) for row in await cursor.fetchall()]
+        valid = []
+        for row in rows:
+            try:
+                parse_iso(row["created_at"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if row.get("episode_id") or row.get("id") is not None:
+                valid.append(row)
+        return sorted(valid, key=lambda ep: parse_iso(ep["created_at"]))
+
+    @staticmethod
+    def _synthesis_has_new(goal, episodes: list[dict]) -> bool:
+        watermark = goal.last_synthesis_episode_at or goal.last_synthesis_at
+        return watermark is None or any(
+            parse_iso(ep["created_at"]) > watermark for ep in episodes
+        )
+
+    async def _synthesize(self, user_id: int, goal, episodes: list[dict]) -> tuple[str, list[str]]:
+        from config.settings import config
+        from core.json_utils import parse_json_lenient
+        from core.llm import get_llm
+        from memory.semantic import semantic
+        from zoneinfo import ZoneInfo
+
+        supplied = episodes[-8:]
+        blob = "\n".join(
+            f"[{i}] {ep['created_at']} {ep.get('content', '')[:200]}"
+            for i, ep in enumerate(supplied)
+        )
+        prompt = (
+            f"Goal: {goal.name} — {goal.description}\n"
+            f"User-turn episodes (zero-based indices):\n{blob or '(none)'}\n"
+            "Extract one durable pattern supported by multiple user turns on distinct dates. "
+            "Cite only supplied episode indices. Return JSON: "
+            '{"content": "...", "type": "preference|trait|knowledge|behavioral", "evidence": [0, 1]}'
+        )
+        result = await get_llm("pattern_extraction", json_mode=True).ainvoke(
+            [HumanMessage(content=prompt)]
+        )
+        parsed = parse_json_lenient(result.content)
+        evidence = parsed.get("evidence") if isinstance(parsed, dict) else None
+        well_formed = (
+            isinstance(evidence, list) and bool(evidence)
+            and all(type(i) is int and 0 <= i < len(supplied) for i in evidence)
+        )
+        cited = [supplied[i] for i in dict.fromkeys(evidence)] if well_formed else []
+        source_ids = list(dict.fromkeys(str(ep.get("episode_id") or ep["id"]) for ep in cited))
+        days = {parse_iso(ep["created_at"]).astimezone(ZoneInfo("Europe/Amsterdam")).date() for ep in cited}
+        content = parsed.get("content") if isinstance(parsed, dict) else None
+        accepted = (
+            well_formed and isinstance(content, str) and bool(content.strip())
+            and len(source_ids) >= config.synth_min_evidence_episodes
+            and len(days) >= config.synth_min_evidence_days
+        )
+        if accepted:
+            doc_id = await semantic.store(
+                user_id=user_id, content=content,
+                pattern_type=parsed.get("type") if isinstance(parsed.get("type"), str) else "general",
+                confidence=0.6, source_episode_ids=source_ids,
+                metadata={"origin": "autonomous_synthesis", "goal": goal.name},
+            )
+            summary, refs = f"Synthesised pattern: {content[:180]}", [f"semantic:{doc_id}"]
+        else:
+            summary = f"Synthesis rejected: insufficient evidence (n={len(source_ids)}, days={len(days)})"
+            refs = []
+            log.info("SYNTH_REJECT goal=%s n=%d days=%d", goal.name, len(source_ids), len(days))
+        # The input was considered even on rejection. Use the newest supplied
+        # input, not wall time, so concurrent arrivals remain eligible.
+        goal.last_synthesis_at = utcnow()
+        if supplied:
+            goal.last_synthesis_episode_at = max(parse_iso(ep["created_at"]) for ep in supplied)
+        return summary, refs
+
     # ── Single action ─────────────────────────────────────────────────────
 
     async def take_action(self, user_id: int) -> dict | None:
@@ -147,6 +241,14 @@ class AutonomousEngine:
             unavailable.add("future_simulate")
         if not getattr(companion, "codebase", None):
             unavailable.add("codebase_read")
+
+        from config.settings import config
+        synthesis_inputs = None
+        if config.synth_gate_enabled and (goal.last_synthesis_episode_at or goal.last_synthesis_at):
+            synthesis_inputs = await self._synthesis_inputs(user_id)
+            if not self._synthesis_has_new(goal, synthesis_inputs):
+                unavailable.add("memory_synthesis")
+                log.info("SYNTH_GATE goal=%s new_user_turns=0", goal.name)
 
         action_type = select_action_type(goal, unavailable=unavailable)
         if action_type is None:
@@ -299,39 +401,9 @@ class AutonomousEngine:
                         artifact_refs = [f"episode:{ep_id}"]
 
             elif action_type == "memory_synthesis":
-                recalled = {"episodic": [], "semantic": []}
-                if self.memory:
-                    recalled = await self.memory.recall(
-                        user_id, goal.description, current_state=self.state,
-                    )
-                blob = "\n".join(
-                    f"- {ep.get('content', '')[:200]}"
-                    for ep in (recalled.get("episodic") or [])[:8]
-                )
-                prompt = (
-                    f"Goal: {goal.name} — {goal.description}\n"
-                    f"Recalled episodes:\n{blob or '(none)'}\n"
-                    "Extract one durable pattern as JSON: "
-                    '{"content": "...", "type": "preference|trait|knowledge|behavioral"}'
-                )
-                from core.json_utils import parse_json_lenient
-                result = await get_llm("pattern_extraction", json_mode=True).ainvoke(
-                    [HumanMessage(content=prompt)]
-                )
-                parsed = parse_json_lenient(result.content)
-                raw = (result.content or "")
-                if isinstance(parsed, list):
-                    parsed = parsed[0] if parsed else {}
-                content = (parsed or {}).get("content") or raw[:300]
-                from memory.semantic import semantic
-                doc_id = await semantic.store(
-                    user_id=user_id,
-                    content=content,
-                    pattern_type=(parsed or {}).get("type", "general"),
-                    confidence=0.6,
-                )
-                summary = f"Synthesised pattern: {content[:180]}"
-                artifact_refs = [f"semantic:{doc_id}"]
+                if synthesis_inputs is None:
+                    synthesis_inputs = await self._synthesis_inputs(user_id)
+                summary, artifact_refs = await self._synthesize(user_id, goal, synthesis_inputs)
 
             elif action_type == "consolidation_review":
                 from memory.semantic import semantic

@@ -17,6 +17,7 @@ from fastembed import TextEmbedding
 from config.settings import config
 
 log = logging.getLogger(__name__)
+_DEFAULT_DEDUP = object()
 
 
 def _content_id(content: str) -> str:
@@ -89,52 +90,43 @@ class SemanticMemory:
         source_episode_ids: list[int] | None = None,
         pattern_type: str = "general",
         confidence: float = 0.7,
+        dedup_sim: float | None | object = _DEFAULT_DEDUP,
     ) -> str:
         """
         Embed and store a piece of crystallised knowledge.
 
-        If the exact same content already exists (by content hash),
-        reinforce it instead of duplicating — bump the confidence
-        and merge source episode IDs.
+        Exact and near-duplicate writes reinforce instead of duplicating.
+        Confidence rises only with new source episodes. Omitted dedup_sim
+        uses config; explicit None disables similarity (not exact dedup).
         """
         doc_id = _content_id(content)
         col = self._collection(user_id)
 
-        # Check if this pattern already exists
         existing = col.get(ids=[doc_id], include=["metadatas"])
         if existing and existing["ids"]:
-            # Reinforce — bump confidence, merge sources
-            old_meta = existing["metadatas"][0] if existing["metadatas"] else {}
-            old_confidence = old_meta.get("confidence", 0.5)
-            old_sources = old_meta.get("source_episode_ids", [])
-            if isinstance(old_sources, str):
-                try:
-                    old_sources = json.loads(old_sources)
-                except json.JSONDecodeError:
-                    old_sources = []
-
-            new_confidence = min(1.0, old_confidence + 0.1)
-            merged_sources = list(set(str(s) for s in (old_sources + (source_episode_ids or []))))
-
-            col.update(
-                ids=[doc_id],
-                metadatas=[{
-                    **old_meta,
-                    "confidence": new_confidence,
-                    "source_episode_ids": json.dumps(merged_sources),
-                    "episode_ids": json.dumps(merged_sources),
-                    "reinforced_at": utcnow().isoformat(),
-                    "reinforcement_count": old_meta.get("reinforcement_count", 0) + 1,
-                    "invalidated": "false",
-                }],
-            )
-            await self._register_refs(merged_sources, doc_id)
+            await self._reinforce(col, doc_id, existing["metadatas"][0] or {}, source_episode_ids)
             return doc_id
 
-        # New pattern — embed and store
+        # Compute once, reuse the vector for query and insertion.
+        embedding = await self._embed(content)
+        threshold = config.semantic_dedup_sim if dedup_sim is _DEFAULT_DEDUP else dedup_sim
+        if threshold is not None and col.count():
+            matches = col.query(
+                query_embeddings=[embedding], n_results=1,
+                where={"invalidated": {"$ne": "true"}},
+                include=["metadatas", "distances"],
+            )
+            ids = (matches.get("ids") or [[]])[0]
+            if ids:
+                similarity = 1 - matches["distances"][0][0]
+                if similarity >= threshold:
+                    matched_id = ids[0]
+                    await self._reinforce(col, matched_id, matches["metadatas"][0][0] or {}, source_episode_ids)
+                    log.info("SEM_MERGE id=%s sim=%.6f", matched_id, similarity)
+                    return matched_id
+
         from memory.timebind import resolve_event_time
 
-        embedding = await self._embed(content)
         source_ids = [str(s) for s in (source_episode_ids or [])]
         stored_at = utcnow()
         event_at, event_local_date = resolve_event_time(content, stored_at)
@@ -157,6 +149,32 @@ class SemanticMemory:
         )
         await self._register_refs(source_ids, doc_id)
         return doc_id
+
+    async def _reinforce(self, col, doc_id: str, old_meta: dict, sources: list | None) -> None:
+        old_sources = old_meta.get("source_episode_ids", [])
+        if isinstance(old_sources, str):
+            try:
+                old_sources = json.loads(old_sources)
+            except (ValueError, TypeError):
+                old_sources = []
+        if not isinstance(old_sources, list):
+            old_sources = []
+        old_ids = {str(s) for s in old_sources}
+        new_ids = {str(s) for s in (sources or [])}
+        merged = sorted(old_ids | new_ids)
+        confidence = old_meta.get("confidence", 0.5)
+        if new_ids - old_ids:
+            confidence = min(1.0, confidence + 0.1)
+        col.update(ids=[doc_id], metadatas=[{
+            **old_meta,
+            "confidence": confidence,
+            "source_episode_ids": json.dumps(merged),
+            "episode_ids": json.dumps(merged),
+            "reinforced_at": utcnow().isoformat(),
+            "reinforcement_count": old_meta.get("reinforcement_count", 0) + 1,
+            "invalidated": "false",
+        }])
+        await self._register_refs(merged, doc_id)
 
     async def _register_refs(self, episode_ids: list[str], doc_id: str) -> None:
         from memory.episodic import episodic

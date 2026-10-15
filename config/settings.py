@@ -84,6 +84,18 @@ class Settings:
     independence_threshold: float = float(os.getenv("INDEPENDENCE_THRESHOLD", "0.3"))
     max_tracked_opinions: int = int(os.getenv("MAX_TRACKED_OPINIONS", "100"))
 
+    # ── Autonomous loop hygiene (SPEC-0004) ──────────────────────────────
+    synth_gate_enabled: bool = _bool_env("SYNTH_GATE_ENABLED", True)
+    synth_min_evidence_episodes: int = int(os.getenv("SYNTH_MIN_EVIDENCE_EPISODES", "2"))
+    synth_min_evidence_days: int = int(os.getenv("SYNTH_MIN_EVIDENCE_DAYS", "2"))
+    # V3: 71 incident docs, 200 seeded negatives; >=90% recall, 0% false positives.
+    semantic_dedup_sim: float = float(os.getenv("SEMANTIC_DEDUP_SIM", "0.8886954917228408"))
+    research_merge_enabled: bool = _bool_env("RESEARCH_MERGE_ENABLED", True)
+    opinion_dup_sim: float = float(os.getenv("OPINION_DUP_SIM", "0.90"))
+    drift_min_comparable: int = int(os.getenv("DRIFT_MIN_COMPARABLE", "3"))
+    memory_block_autonomous_max: int = int(os.getenv("MEMORY_BLOCK_AUTONOMOUS_MAX", "0"))
+    self_obs_autonomous: bool = _bool_env("SELF_OBS_AUTONOMOUS", False)
+
     # ── Session ───────────────────────────────────────────────────────────
     session_timeout_minutes: float = float(os.getenv("SESSION_TIMEOUT_MIN", "15"))
     working_memory_capacity: int = int(os.getenv("WORKING_MEMORY_CAPACITY", "20"))

@@ -225,6 +225,22 @@ export EMBEDDING_CACHE_DIR=/home/george-contis/Documents/Keeper/data/fastembed
 
 Classifier safety stops must not be bypassed if the live dataset differs from the verified copy. Rebuild performs configured LLM calls; a second successful rebuild request is a no-op.
 
+## Landing
+
+Implemented by the coding assistant on `spec-0004-loop-hygiene`: stage 1 `7dc2270`, stage 2 `0534cf9`, stage 3 `23d2c72`; final documentation commit contains this landing record. Spec header and index marked `implemented` after the repaired-copy integrated acceptance passed. No pushes or remote operations.
+
+O-ID evidence: O1→V1/V4; O2→V2/V4; O3→V3; O4→V5; O5→V6; O6→V7/V11; O7→V8; O8→V10/integrated; O9→V11; O10→V12/integrated; O11→V13; O12→V14/V15/V16. All §7 paths exercised except retry/cancel/timeouts (explicitly excluded by the spec); empty collections, legacy state, same-day/malformed evidence, unrelated text, novel research, mixed pruning, sparse rebuild and provenance safety boundaries have unit evidence in `test_patch04.py`.
+
+Final evidence artifacts:
+- `/tmp/spec0004-final-tests.log`: 172 passed.
+- `/tmp/spec0004-final-test_*.py.log`: four direct runners passed; direct goals failure identical to baseline.
+- `/tmp/spec0004-integrated.py`, `-integrated.log`, `-integrated-result.json`: copy acceptance harness/results.
+- `/tmp/spec0004-complete-functions.diff`: complete changed functions with surrounding calling context (`git diff --function-context 64f6620 23d2c72 -- config core goals memory scripts`); inventories above name cross-module callers.
+- `/tmp/spec0004-protected.diff`: empty; protected files and their docs copies unchanged.
+- `/tmp/spec0004-final-stat.txt`: whole-change stat, generated with `git diff --stat 64f6620` before the final documentation-only landing additions. Implementation stage commits alone: 18 files, 1935 insertions, 113 deletions.
+
+Artifacts under `/tmp` are local session evidence, not committed copies of incident data. The durable numeric results, diagnoses, commands, and outcome mapping are recorded here. The only remaining untracked paths are the pre-existing `.agent/` and `AGENTS.md`; neither was staged.
+
 ## Resume action
 
 No implementation work queued. Review the local stage commits and run record; deployment/live repairs belong to Lucas. Never push. If resuming implementation changes, rerun baseline under four-path isolation first.

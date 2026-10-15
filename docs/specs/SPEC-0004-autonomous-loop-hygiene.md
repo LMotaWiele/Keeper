@@ -3,7 +3,8 @@ File: /docs/specs/SPEC-0004-autonomous-loop-hygiene.md
 
 | Field | Value |
 |---|---|
-| Status | ready |
+| Status | implemented |
+| Implemented by | Coding assistant — `7dc2270`, `0534cf9`, `23d2c72` (local only) |
 | Size | staged (3 stages) |
 | Kind | fix |
 | Parent | SPEC-0003 (`docs/specs/SPEC-0003-relational-grounding.md`) |
@@ -279,4 +280,4 @@ Never mark an unrun check as passed. Never run `--apply` against the live `DATA_
 
 ## 11. Landing
 
-Filled from the review.
+Implemented locally on `spec-0004-loop-hygiene` by the coding assistant in `7dc2270`, `0534cf9`, and `23d2c72`, without the spec tool. V1–V17 and repaired-copy integrated acceptance passed; pytest 172 passed. The pre-existing direct `test_goals.py` failure is unchanged and recorded separately. Review evidence, calibration distributions, safety decisions, and operator-only live repair commands: `SPEC-0004-run.md`. No live data repaired and no push performed.

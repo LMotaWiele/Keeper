@@ -1,4 +1,8 @@
-# Keeper routing v2 (non-conflicting)
+# SPEC-0001: Keeper routing v2 (non-conflicting)
+
+**Implemented by:** `1f0370a` (historical implementation; acceptance not rerun during migration).
+**Date first added:** 2026-09-22
+**Former path:** `docs/routing-v2-spec.md`
 
 **Status:** accepted — implemented (PRs 1–4 plus `should_simulate` / `any_module_relevant`).
 

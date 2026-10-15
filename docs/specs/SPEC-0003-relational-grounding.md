@@ -1,4 +1,9 @@
-# Keeper Patch 03 — Relational Grounding
+# SPEC-0003: Keeper Patch 03 — Relational Grounding
+
+**Status:** implemented (historical mechanisms; day-14 acceptance not verified during migration).
+**Implemented by:** `21a9136`.
+**Date first added:** 2026-09-23
+**Former path:** `docs/Keeper Patch 03 — Relational Grounding.md`
 
 2026-09-22 · @Someone
 

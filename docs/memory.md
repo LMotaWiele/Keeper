@@ -11,7 +11,7 @@ Two rings, default total 20 (`WORKING_MEMORY_CAPACITY` = `DIALOGUE_WINDOW` 12 + 
 
 Each LangChain message is prefixed with user-local time (`[2026-09-07 16:39 CEST]`; pins: `[earlier · 2026-09-07 CEST]`).
 
-Persisted to `data/state/working_memory.json`. Episodic/semantic content is de-duped against this window before it enters the system prompt. See `docs/context-time-spec.md`.
+Persisted to `data/state/working_memory.json`. Episodic/semantic content is de-duped against this window before it enters the system prompt. See `docs/specs/SPEC-0002-context-time.md`.
 
 ## Episodic (`memory/episodic.py`)
 

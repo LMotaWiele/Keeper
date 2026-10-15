@@ -1,4 +1,8 @@
-# Prompt reinsertion and temporal binding
+# SPEC-0002: Prompt reinsertion and temporal binding
+
+**Implemented by:** `1f0370a` (historical implementation; acceptance not rerun during migration).
+**Date first added:** 2026-09-22
+**Former path:** `docs/context-time-spec.md`
 
 **Status:** accepted — implemented (PRs 1–3).
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from core.timeutil import utcnow, parse_iso
 from pathlib import Path
 from typing import Any
@@ -62,6 +62,8 @@ Recent behavioral observations:
 {observations}
 
 {previous_model_context}
+
+{autonomous_activity}
 
 {architecture_context}
 """
@@ -232,7 +234,8 @@ class SelfModel:
     giving the system genuine self-knowledge that evolves with its behavior.
     """
 
-    def __init__(self, memory_system: Any = None, codebase: Any = None):
+    def __init__(self, memory_system: Any = None, codebase: Any = None, goals: Any = None):
+        self.goals = goals  # Optional injection; live companion is resolved lazily.
         self.memory = memory_system
         self.codebase = codebase  # CodebaseIndex, optional
         self._running = False
@@ -382,11 +385,64 @@ class SelfModel:
 
         return self.model
 
-    async def _layer1_observation_update(self, user_id: int) -> bool:
-        """Analyse accumulated self-observations and rebuild the model. True if the model changed."""
-        observations = await self.memory.episodic.get_recent(
-            user_id, limit=50, type="self_observation"
+    async def _clean_observations(self, user_id: int, limit: int) -> list[dict]:
+        """Fill the requested clean window, even behind an arbitrarily long degraded tail."""
+        if self.memory is None:
+            return []
+        fetch = limit
+        while True:
+            rows = await self.memory.episodic.get_recent(
+                user_id, limit=fetch, type="self_observation"
+            )
+            clean = []
+            for row in rows:
+                tags = row.get("tags") or []
+                if isinstance(tags, str):
+                    try:
+                        tags = json.loads(tags)
+                    except (ValueError, TypeError):
+                        tags = []
+                if "degraded" not in tags:
+                    clean.append(row)
+            if len(clean) >= limit or len(rows) < fetch:
+                return clean[:limit]
+            fetch *= 2
+
+    def _autonomous_activity(self, now: datetime | None = None) -> str:
+        """Counts from retained goal logs, never interpretation of summary prose."""
+        goals = self.goals
+        if goals is None:
+            from core.loop import companion
+            goals = companion.goals
+        now = now or utcnow()
+        counts: dict[str, list[int]] = {}
+        for collection in ("terminal_goals", "instrumental", "completed", "abandoned"):
+            for goal in getattr(goals, collection, []):
+                for record in goal.action_log:
+                    try:
+                        at = parse_iso(record["timestamp"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not now - timedelta(days=7) <= at <= now:
+                        continue
+                    pair = counts.setdefault(record.get("action_type") or "unknown", [0, 0])
+                    pair[0 if record.get("artifact_refs") else 1] += 1
+        lines = [
+            "Autonomous harness activity (last 7 days, retained goal logs only):",
+            "What the autonomous scheduler did, not what you said.",
+        ]
+        lines.extend(
+            f"- {kind}: artifact produced={pair[0]}, nothing={pair[1]}"
+            for kind, pair in sorted(counts.items())
         )
+        return "\n".join(lines + ([] if counts else ["- No retained actions in this window."]))
+
+    async def _layer1_observation_update(
+        self, user_id: int, *, bypass_jev: bool = False,
+        previous_model_context: str | None = None,
+    ) -> bool:
+        """Analyse clean observations. An explicit empty context requests a fresh rebuild."""
+        observations = await self._clean_observations(user_id, limit=50)
 
         if len(observations) < 5:
             log.info("Not enough observations to update self-model (%d)", len(observations))
@@ -397,8 +453,8 @@ class SelfModel:
             for i, obs in enumerate(observations)
         )
 
-        prev_context = ""
-        if self.model.get("model_version", 0) > 0:
+        prev_context = previous_model_context or ""
+        if previous_model_context is None and self.model.get("model_version", 0) > 0:
             prev_context = (
                 "Previous self-model (for continuity — update, don't start from scratch):\n"
                 f"{json.dumps(self.model, indent=2, default=str)}"
@@ -416,6 +472,7 @@ class SelfModel:
             observations=obs_text,
             previous_model_context=prev_context,
             architecture_context=architecture_context,
+            autonomous_activity=self._autonomous_activity(),
         )
 
         try:
@@ -431,13 +488,14 @@ class SelfModel:
                 )
                 if k in self.model
             }
-            if not await jev_should_run(
+            if not bypass_jev and not await jev_should_run(
                 "observations_warrant_rewrite",
                 {"observations": obs_text[:8000], "claims": compact_claims},
                 background=True,
                 task="self_model_analysis",
             ):
-                log.info("self_model_analysis skipped — jev observations_warrant_rewrite")
+                self.model["observations_analysed"] = self.model.get("observation_count", 0)
+                log.info("SELFMODEL_SKIP reason=jev")
                 return False
         except Exception:
             log.debug("self-model Jev gate failed — fail open", exc_info=True)
@@ -452,10 +510,22 @@ class SelfModel:
                 log.warning("Self-model update failed to parse")
                 return False
 
+            version = self.model.get("model_version", 0)
+            count = self.model.get("observation_count", 0)
+            if previous_model_context == "":
+                # Archive the old model even when it was omitted from the prompt.
+                self.recursion_guard.record_model(self.model)
+                # Do not carry any old derived fields into a clean rebuild.
+                self.model = {}
+                updated.pop("hypotheses", None)
             self.model.update(updated)
+            if previous_model_context == "":
+                self.model["hypotheses"] = []
+                self.model["consistency_flags"] = []
+            self.model["observation_count"] = count
             self.model["last_updated"] = utcnow().isoformat()
-            self.model["model_version"] = self.model.get("model_version", 0) + 1
-            self.model["observations_analysed"] = len(observations)
+            self.model["model_version"] = version + 1
+            self.model["observations_analysed"] = count
 
             log.info(
                 "Self-model updated (v%d, %d observations, %d tensions)",
@@ -482,9 +552,7 @@ class SelfModel:
 
     async def _layer2_consistency_check(self, user_id: int) -> None:
         """Does the model's claims match recent actual behavior?"""
-        recent_obs = await self.memory.episodic.get_recent(
-            user_id, limit=10, type="self_observation"
-        )
+        recent_obs = await self._clean_observations(user_id, limit=10)
         if not recent_obs:
             return
 
@@ -543,9 +611,7 @@ class SelfModel:
         Generate testable hypotheses about self. Called during
         self-model update cycle (not every message).
         """
-        observations = await self.memory.episodic.get_recent(
-            user_id, limit=30, type="self_observation"
-        )
+        observations = await self._clean_observations(user_id, limit=30)
         if len(observations) < 10:
             return []
 

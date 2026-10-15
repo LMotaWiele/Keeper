@@ -276,7 +276,7 @@ class AutonomousEngine:
                         artifact_refs.append(f"opinion:{result['opinion_id']}")
                     if result.get("episode_id"):
                         artifact_refs.append(f"episode:{result['episode_id']}")
-                    if self.self_model:
+                    if self.self_model and config.self_obs_autonomous:
                         await self.self_model.observe(
                             user_id=user_id,
                             action=summary,

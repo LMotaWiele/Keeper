@@ -2,7 +2,7 @@
 
 ## Status
 
-Stages 1–2 implemented and verified (V1–V11 and both scripts' V17); stage 3 pending. Four-path isolation, preceding-episode classification, and shared observation cleaning are explicit in the spec. Final acceptance remains pending.
+All three stages implemented and verified. V1–V17 and integrated acceptance passed, with the separately recorded pre-existing direct `test_goals.py` failure unchanged. Final pytest: 172 passed. Four-path isolation and all planner revisions applied; only the data copy was repaired.
 
 - Spec: `SPEC-0004-autonomous-loop-hygiene.md`, including this session's user-requested pre-landing planner revision.
 - Run base: `1c06f3c1735b6cabf5e25f2a9f4856ac5c2939e1` (descendant of `21a9136`, verified with `git merge-base --is-ancestor`).
@@ -10,7 +10,7 @@ Stages 1–2 implemented and verified (V1–V11 and both scripts' V17); stage 3 
 - Current commit: this run record's local commit (resolve with `git log -1`); no push.
 - Pre-existing uncommitted changes: untracked `.agent/` and `AGENTS.md`; excluded from this change.
 - Supplied copy: `/home/george-contis/keeper-data-copy-20261015` (corrected by user and verified present with `episodic.db`, `chroma/`, and `state/`). The earlier `/home/keeper-data-copy-20261015` path was incorrect. No empty replacement was created.
-- Repairs used: 0 in all stage-1 groups. Baseline and stage-1 checks recorded below.
+- Repairs used: stage 1 zero; stage 2 V6 one test-namespace repair; stage 3 zero required-check repairs. Two review hardenings (one-time rebuild marker and user-memory refill) added with regression checks. Baseline and all checks below.
 
 ## Step 0: expected versus actual
 
@@ -69,10 +69,10 @@ The three resolved items are not open design conflicts or reasons to stop implem
 - Resume baseline: pytest **80 passed**; direct budget/opinions/research/routing passed. Direct `test_goals.py` has a pre-existing failure at `test_invalid_condition_creates_unbounded` (`assert len(new) == 1`); preserved unchanged. Logs: `/tmp/spec0004-baseline.log`, `/tmp/spec0004-baseline-direct-all.log`.
 - Stage 1: V1–V5 passed; 110 pytest checks passed including 30 new mocked checks; direct runners unchanged from baseline. Exit accepted with the recorded pre-existing direct-run failure, not certified as a wholly green direct suite.
 - Stage 2: V6–V11 passed; pytest 131 passed. One V6 test-namespace repair consumed; direct runners unchanged from baseline.
-- Stage 3: not started; V12–V16 not-run.
-- V17: specified by planner revision; not implemented/not-run.
-- Copy-dependent checks V3, V5, V8, V11, V15, V16 and integrated acceptance: **not-run**, never passed. Correct copy is now present; the former missing-copy blocker is cleared.
-- Stage-1 calibration, dry-run and O1–O4 evidence below; O5–O12 pending.
+- Stage 3: V12–V16 passed; 172 pytest checks passed after review hardening; direct runners retain the baseline results.
+- V17: passed for all three scripts, every escape and applicable dry/apply/rebuild mode.
+- Copy-dependent checks V3, V5, V8, V11, V15, V16 and integrated acceptance: passed on the supplied copy, not on live data.
+- O1–O12 evidence is mapped to checks in the stage tables.
 - Protected files: untouched. Stage-1 changed-function inventory below; final live repair commands will be recorded after all scripts exist.
 
 ## Earlier resume at e047afd (historical; superseded by planner resolution below)
@@ -165,6 +165,66 @@ Compaction uses the specified greedy **canonical** similarity, not transitive co
 
 Stage-2 changed functions/callers: `Opinion.to_dict/from_dict` (dataclass fields), registry `_prune/detect_drift`; `ResearchEngine.research_topic` via autonomous `take_research_action/take_action` and `scripts/diag_autonomous.py`; `EpisodicMemory.format_for_prompt` via memory facade; compaction `compact_snapshot/_updated_json/run/main` via CLI. Full functions in local commit diff. Compaction carries prior corroboration mass instead of resetting counters on rerun; initial copy had zero new counters, so first-run count equals cluster size−1. Atomicity is per file via `core.atomic`, consistent with existing persistence; retry reconciles embedded and authoritative stores. Protected diff empty.
 
+## Stage 3 verification and final acceptance
+
+Stage-2 commit `0534cf9`. All data commands used the four exports above. No live directory, identity file, or prohibited session-trace tree was read or edited. The actual self-model rebuild used the configured LLM; replay LLM/search seams were mocked.
+
+| Check | Result / evidence |
+|---|---|
+| V12 | PASS: flag off prevents successful research observe; flag on preserves legacy behavior; actual analysis prompt fixture has deterministic seven-day action counts and no summary prose |
+| V13 | PASS: analysis and Jev skip set analysed=397; background loop attempts only at 5 new observations |
+| V14 | PASS: shared helper feeds layer 1, layer 2, hypotheses; clean window recovered behind 2000 degraded observations |
+| V15 | PASS: 120-second boundary, same-user nearest predecessor, both refusal conditions and 10% boundary, dry/apply/repeat, unclassified preservation, sparse rebuild tested; actual copy counts below |
+| V16 | PASS: actual v13→v14, previous-model content archived, active model and hypotheses contain no harness phrase; fresh rebuild omits prior context; mock sparse case leaves model unchanged |
+| V17 (degrade) | PASS: all four paths print first; each DB/Chroma/cache escape refused before loader, in all four apply/rebuild combinations |
+| Shared | Final `python -m pytest -q`: **172 passed**; direct runners unchanged from baseline |
+
+Actual dry-run `/tmp/spec0004-v15-dry.log`: observations=93; rule-(a)=67; rule-(b)/autonomous=83; conversation=10; unclassified=0 (0%); rule-(a) mismatches=0. Apply degraded 83; repeat degraded 0. Ten conversational observations remained clean. Logs `/tmp/spec0004-v15-apply.log`, `-repeat.log`. Actual rebuild `/tmp/spec0004-v15-rebuild.log` produced **v14**, observation_count=observations_analysed=397, three regenerated hypotheses. Before snapshot `/tmp/spec0004-model-before-rebuild.json`. The complete old v13 derived content (excluding normal bookkeeping/embedded registries) is in `_recursion_guard.model_history`. Active v14 JSON (excluding historical archive and separate opinion registry) and the prompt block contain no `Researched and formed opinion`. The archive intentionally retains v13's old claim; deleting it would violate the spec.
+
+Review hardening: persisted `_spec0004_rebuild` from/to-version marker prevents repeated explicit rebuild from creating v15; repeated `--apply --rebuild` preserved the model file hash (`/tmp/spec0004-v15-sha-before`, `-after`, `-rebuild-repeat.log`). Formatting refills past high-ranked autonomous artifacts so a flood cannot starve user facts below the initial 40-row window; regression fixture has 100 artifacts before a user fact. Unit paths were made temporary rather than machine-specific. No required-check failure preceded these hardenings.
+
+One extra inspection compared embedded opinions to raw standalone JSON after a normal self-model save and found newly serialized dataclass defaults. Diagnosis: normal snapshot normalization, not changed opinions. Rechecking through `OpinionRegistry.restore/snapshot` confirmed equality. Standalone non-external JSON remains unchanged. No protected or production behavior was weakened to satisfy that inspection.
+
+### Integrated acceptance
+
+Command after scripts applied in order 1→2→3: four exports, then `.venv/bin/python /tmp/spec0004-integrated.py`. Harness artifact retained at that path; output `/tmp/spec0004-integrated.log`, result `/tmp/spec0004-integrated-result.json`. Uses `load_companion_no_loops`, real dispatch, gates, local embeddings/research merge, rating and `build_context`. Network LLM/search synthesis seams are mocked with real incident/research paraphrases; research cosine 0.928967. Only the off-limits identity block is omitted by pointing `soul_file_path` to a nonexistent copy-local test path; no identity contents were read. Budget was made permissive for the replay and selection targeted the affected action paths.
+
+**PASS:** twelve `take_action` cycles (two legacy-eligible synthesis rejections, then ten research corroborations, rotating both goals) with no new user episodes. Semantic/opinion/self_observation counts **(1238, 22, 93) → (1238, 22, 93)**. No new artifacts. `build_context` for `I stayed up late again working on the experiment` retained the user-memory block, with no research_completed lines there, no invalidated flood content in semantic formatting, no zero-disagreement alert, and no harness phrase in the self-model block. This is acceptance on the copy only, not a live deployment assertion.
+
+### Review decisions / deviations
+
+- Four-path guard intentionally validates containment, as specified; it does not prohibit Lucas's explicit stopped-live repair commands below. Agent invocations used only the copy.
+- Existing exact-hash invalidation/revalidation behavior is retained; nearest-neighbour matching excludes invalidated documents. No new revalidation policy was introduced.
+- Research considers all external opinions as specified, including low-conviction ones; conviction stays unchanged on corroboration. No unscheduled abandonment/revalidation policy was added.
+- Compaction preserves accumulated corroboration on retries instead of resetting to zero; first-run copy counters match cluster size−1. Per-file atomic writes match existing persistence, not a new multi-file transaction.
+- Seven-day scheduler statistics explicitly cover retained logs, not evicted records.
+- Rebuild archive retains content of v13 under the existing history format, whose normal `record_model` omits version metadata; marker records from_version=13 and to_version=14.
+- The known direct-run goals baseline failure was not repaired or hidden. Pytest and the other direct runners remained green.
+
+### Changed functions and callers
+
+In addition to earlier inventories: `SelfModel.__init__` optional goals injection; `_clean_observations` via layer 1/layer 2/hypotheses; `_autonomous_activity` via `ANALYSIS_PROMPT`; `_layer1_observation_update` via `update_model` and repair script; existing autonomous research observe call gated by config; degradation `_tags/classify_observations/validate_classifications/run/main` via CLI. Full changed functions and their calling context are in `git diff 64f6620..HEAD -- core goals memory scripts config` (include the stage-3 commit). New tests reside only in `test_patch04.py`. Final whole-change stat and protected diff are recorded at landing; no protected files changed.
+
+### Operator commands (NOT run on live data)
+
+With Keeper stopped, from `/home/george-contis/Documents/Keeper`, Lucas can run these after reviewing dry-runs. Paths are deliberately explicit and all four must remain isolated together when using a copy. These particular commands intentionally target live data and are for Lucas only:
+
+```sh
+export DATA_DIR=/home/george-contis/Documents/Keeper/data
+export MIDTERM_DB_PATH=/home/george-contis/Documents/Keeper/data/episodic.db
+export CHROMA_DB_PATH=/home/george-contis/Documents/Keeper/data/chroma
+export EMBEDDING_CACHE_DIR=/home/george-contis/Documents/Keeper/data/fastembed
+.venv/bin/python scripts/purge_synthesis_flood.py
+.venv/bin/python scripts/purge_synthesis_flood.py --apply
+.venv/bin/python scripts/compact_opinions.py
+.venv/bin/python scripts/compact_opinions.py --apply
+.venv/bin/python scripts/degrade_autonomous_observations.py
+.venv/bin/python scripts/degrade_autonomous_observations.py --apply
+.venv/bin/python scripts/degrade_autonomous_observations.py --rebuild
+```
+
+Classifier safety stops must not be bypassed if the live dataset differs from the verified copy. Rebuild performs configured LLM calls; a second successful rebuild request is a no-op.
+
 ## Resume action
 
-Proceed to stage 3 after the stage-2 local commit; keep four-path isolation. Then integrated acceptance. Do not mark implemented or accepted while required checks remain unrun.
+No implementation work queued. Review the local stage commits and run record; deployment/live repairs belong to Lucas. Never push. If resuming implementation changes, rerun baseline under four-path isolation first.

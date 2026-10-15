@@ -536,7 +536,24 @@ class EpisodicMemory:
 
         now = now or utcnow()
         exclude_texts = list(exclude_texts or [])
-        episodes = await self.recall(user_id, limit=40)
+        # Refill after applying the quota: a flood of highly ranked artifacts
+        # must not hide user memories below the first recall window.
+        autonomous_max = max(0, config.memory_block_autonomous_max)
+        fetch = 40
+        while True:
+            recalled = await self.recall(user_id, limit=fetch)
+            episodes = []
+            autonomous_kept = 0
+            for ep in recalled:
+                if ep.get("source") == "autonomous_artifact":
+                    if autonomous_kept >= autonomous_max:
+                        continue
+                    autonomous_kept += 1
+                episodes.append(ep)
+            if len(episodes) >= 40 or len(recalled) < fetch:
+                episodes = episodes[:40]
+                break
+            fetch *= 2
         stats = {
             "ep_in": len(episodes),
             "ep_kept": 0,
@@ -545,19 +562,6 @@ class EpisodicMemory:
         }
         if not episodes:
             return "", [], stats
-
-        # Apply the autonomous cap before ranking/budget selection. This is a
-        # formatting policy only; recall and other episode consumers are unchanged.
-        autonomous_max = max(0, config.memory_block_autonomous_max)
-        autonomous_kept = 0
-        filtered = []
-        for ep in episodes:
-            if ep.get("source") == "autonomous_artifact":
-                if autonomous_kept >= autonomous_max:
-                    continue
-                autonomous_kept += 1
-            filtered.append(ep)
-        episodes = filtered
 
         type_rank = {
             "fact": 0,

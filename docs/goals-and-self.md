@@ -28,7 +28,7 @@ Every `AUTONOMOUS_INTERVAL_MIN` minutes, if no session is active and fatigue is 
 2. If independence score is low and no research goal exists, suggest research topics.
 3. Take one step on the highest-salience active goal that is not over its `budget_share`.
 
-`select_action_type` is epsilon-greedy with forced exploration (`n < 2`). MID-tier actions (`web_research`, `self_theorize`, `future_simulate`) fall through when the background MID gate refuses.
+`select_action_type` is epsilon-greedy with forced exploration (`n < 2`). MID-tier actions (`web_research`, `self_theorize`, `future_simulate`) fall through when the background MID gate refuses. Autonomous memory synthesis is unavailable without a new user turn since that goal's persisted input watermark; accepted patterns require two cited user episodes on two Amsterdam dates. Rejected evidence also advances the watermark. Action selection and Elo are otherwise unchanged.
 
 ## Research (`goals/research.py`)
 
@@ -42,7 +42,9 @@ This is how Keeper gets something to push back *from* that is not the user’s o
 
 ## Self-model (`core/self_model.py`)
 
-After every reply, `observe()` writes a self-observation. Every 5th non-trivial one is an LLM summary; the rest are compact.
+After every conversation reply, `observe()` writes a self-observation. Every 5th non-trivial one is an LLM summary; the rest are compact. Autonomous research no longer calls `observe()` by default (`SELF_OBS_AUTONOMOUS=false`). Instead, analysis receives deterministic seven-day action-type × artifact/nothing counts from retained goal logs, explicitly labelled as scheduler activity, not conversational behavior.
+
+Layer 1, layer 2, and hypothesis generation share `_clean_observations`, excluding degraded episodes and refilling the requested window. Both successful analysis and Jev refusal advance `observations_analysed` to the cumulative `observation_count`; another attempt requires five new observations.
 
 Periodically `update_model()`:
 
@@ -52,6 +54,8 @@ Periodically `update_model()`:
 4. Generate hypotheses that bias later goals/actions.
 
 The prompt block is honest about tensions and unsupported claims.
+
+`scripts/degrade_autonomous_observations.py` defaults to dry-run. It classifies each observation from the nearest preceding non-observation episode for the same user within 120 seconds, never session windows. Repairs stop if any `Given 'Goal: ` match is not autonomous or more than 10% are unclassified. Apply tags autonomous-derived observations degraded and scales importance once. An explicit one-time `--rebuild` requires prior apply and five clean observations, bypasses Jev, omits the previous model from analysis, archives that model, and regenerates hypotheses from cleaned observations.
 
 ## Opinions (`core/opinions.py`)
 
